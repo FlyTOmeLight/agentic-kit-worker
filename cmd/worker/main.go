@@ -3,15 +3,16 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
-	"github.com/FlyTOmeLight/agentic-kit-worker/internal/adapters"
-	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
+	"flag"
 	"log/slog"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
-	"time"
+
+	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
+	"github.com/FlyTOmeLight/agentic-kit-worker/internal/adapters"
+	"github.com/FlyTOmeLight/agentic-kit-worker/internal/config"
+	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
 func main() {
@@ -23,25 +24,17 @@ func main() {
 func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	s, err := durable.Open(ctx, os.Getenv("DATABASE_URL"))
+	path := flag.String("config", os.Getenv("CONFIG_FILE"), "TOML configuration file")
+	flag.Parse()
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	s, err := durable.Open(ctx, cfg.Database.URL)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-	n := 4
-	if raw := os.Getenv("WORKER_CONCURRENCY"); raw != "" {
-		n, err = strconv.Atoi(raw)
-		if err != nil {
-			return err
-		}
-	}
-	lease := 30 * time.Second
-	if raw := os.Getenv("WORKER_LEASE"); raw != "" {
-		lease, err = time.ParseDuration(raw)
-		if err != nil {
-			return err
-		}
-	}
-	w := engine.Worker{Engine: &engine.Engine{Store: s, Build: adapters.Build}, ID: durable.NewID(), Concurrency: n, Lease: lease, Poll: time.Second}
+	w := engine.Worker{Engine: &engine.Engine{Store: s, Build: adapters.Build}, ID: durable.NewID(), Concurrency: cfg.Worker.Concurrency, Lease: cfg.Worker.Lease, Poll: cfg.Worker.Poll}
 	return w.Run(ctx)
 }

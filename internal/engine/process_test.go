@@ -206,8 +206,25 @@ func startAPI(t *testing.T, binary, dsn, token string, spec durable.Spec) string
 	if err = listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(binary)
-	cmd.Env = append(os.Environ(), "DATABASE_URL="+dsn, "AGENTS_FILE="+path, "API_TOKENS_JSON={\""+token+"\":\"owner\"}", "LISTEN_ADDR="+address, "REDIS_URL=redis://127.0.0.1:1/0", "GIN_MODE=release")
+	configPath := filepath.Join(filepath.Dir(path), "config.toml")
+	tokens, err := json.Marshal(map[string]string{token: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := fmt.Sprintf("[database]\nurl = %q\n[http]\nlisten_addr = %q\n[redis]\nurl = %q\n[agents]\nfile = %q\n[auth]\ntokens_json = %q\n", dsn, address, "redis://127.0.0.1:1/0", filepath.Base(path), string(tokens))
+	if err := os.WriteFile(configPath, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(binary, "-config", configPath)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "DATABASE_URL", "AGENTS_FILE", "API_TOKENS_JSON", "LISTEN_ADDR", "REDIS_URL", "CONFIG_FILE", "GIN_MODE":
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	cmd.Env = append(cmd.Env, "GIN_MODE=release")
 	// Redis is intentionally unreachable; the HTTP replay contract must remain usable.
 	logPath := filepath.Join(t.TempDir(), "api.log")
 	log, err := os.Create(logPath)

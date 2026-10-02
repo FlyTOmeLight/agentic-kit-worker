@@ -2,7 +2,7 @@
 
 独立部署的 Agent 执行进程。从 PostgreSQL 领取任务，调用 Eino 模型和工具，在模型决策与工具结果之间保存状态；进程重启后，其他实例可以接管同一任务。
 
-与 `agentic-kit-api` 仓库配套。运行方式见 [API 启动说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/README.md)。Go module 引用 GitHub 上 API 的 `v0.1.0` 版本，可独立克隆和构建；私有模块认证与可选 go work 联合开发见 API 启动说明。
+与 `agentic-kit-api` 仓库配套。运行方式见 [API 启动说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/README.md)。Go module 引用 GitHub 上 API 的 `v0.1.1` 版本，可独立克隆和构建；私有模块认证与可选 go work 联合开发见 API 启动说明。
 
 ## 项目结构
 
@@ -22,6 +22,18 @@
 当前模型使用完整 Generate，SSE 展示步骤进度与完整结果，不逐 token 推送。工具按模型返回的顺序执行，不并发执行同一轮工具。
 
 ## 配置
+
+复制 `configs/config.example.toml` 为 `configs/config.local.toml`，执行 `go run ./cmd/worker -config configs/config.local.toml`。也可通过 CONFIG_FILE 指定文件；未指定文件时读取环境变量和默认值。独立 Viper 实例在启动时解码和校验，修改配置后需重启。
+
+| TOML 字段 | 环境变量 | 默认值 |
+| --- | --- | --- |
+| database.url | DATABASE_URL | 必填 |
+| worker.concurrency | WORKER_CONCURRENCY | 4 |
+| worker.lease | WORKER_LEASE | 30s，至少 300ms |
+| worker.poll | WORKER_POLL | 1s，必须大于 0 |
+
+环境变量 > TOML > 默认值；空环境变量也覆盖文件。未知字段、非法时长、非正并发数和读取错误均在连接数据库前报告。模型和工具密钥仍由环境变量提供。Viper v1.21.0 用于配置解析和覆盖，MIT 许可，无需 CGO；固定依赖见 go.mod/go.sum，本次未运行漏洞数据库扫描。
+
 
 - `DATABASE_URL`：与 API 相同的 PostgreSQL。
 - `WORKER_CONCURRENCY`：默认 4，每个实例同时执行的任务数。

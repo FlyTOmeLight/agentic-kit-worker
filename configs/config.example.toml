@@ -1,0 +1,7 @@
+[database]
+url = "postgres://agentic:agentic_local@127.0.0.1:55432/agentic?sslmode=disable"
+
+[worker]
+concurrency = 4
+lease = "30s"
+poll = "1s"

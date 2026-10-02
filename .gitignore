@@ -5,3 +5,6 @@ bin/
 *.local.json
 *.log
 .DS_Store
+*.local.toml
+go.work
+go.work.sum
