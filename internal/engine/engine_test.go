@@ -15,7 +15,8 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
-	"github.com/jackc/pgx/v5"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 func testDB(t *testing.T) (*durable.Store, string) {
@@ -25,12 +26,12 @@ func testDB(t *testing.T) (*durable.Store, string) {
 		t.Skip("TEST_DATABASE_URL required")
 	}
 	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, dsn)
+	admin, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	name := "test_" + durable.NewID()
-	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+name); err != nil {
+	if err = admin.WithContext(ctx).Exec("CREATE SCHEMA " + name).Error; err != nil {
 		t.Fatal(err)
 	}
 	u, err := url.Parse(dsn)
@@ -49,11 +50,12 @@ func testDB(t *testing.T) (*durable.Store, string) {
 	}
 	t.Cleanup(func() {
 		store.Close()
-		_, err := admin.Exec(ctx, "DROP SCHEMA "+name+" CASCADE")
+		err := admin.WithContext(ctx).Exec("DROP SCHEMA " + name + " CASCADE").Error
 		if err != nil {
 			t.Error(err)
 		}
-		_ = admin.Close(ctx)
+		pool, _ := admin.DB()
+		_ = pool.Close()
 	})
 	return store, u.String()
 }
