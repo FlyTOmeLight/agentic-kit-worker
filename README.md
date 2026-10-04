@@ -54,3 +54,9 @@ make integration
 [完整迁移范围](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/migration.md) · [故障语义](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/design.md)
 
 Agent 定义通过 API 管理和发布。worker 始终读取 Run 快照，编辑草稿或发布新版本不会改变正在执行的任务。v0.2 需要配套的新会话存储，升级范围见 API README；不与 v0.1 API 混用。
+
+## Coding 工具与 Kubernetes
+
+HTTP 工具请求由 Worker 注入 `X-Agentic-Run-ID`、`X-Agentic-Epoch` 和稳定 Idempotency-Key。工具服务应同时验证运行时执行权与业务写入资格。Coding 工具使用独立项目部署及项目访问令牌，不在 Worker 中添加另一套任务调度。
+
+Helm Chart 位于 `charts/agentic-kit-worker`，用 `existingSecret` 指定运行时数据库与工具凭据。私有模块构建使用相邻 API checkout：`docker build --build-context agentic_api=../agentic-kit-api -t agentic-kit-worker:dev .`，两个 checkout 应对应相同发布版本。

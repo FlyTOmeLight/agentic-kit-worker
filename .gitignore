@@ -8,3 +8,5 @@ bin/
 *.local.toml
 go.work
 go.work.sum
+
+.local/

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,6 +83,9 @@ func (t *httpTool) InvokableRun(ctx context.Context, args string, _ ...tool.Opti
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", engine.OperationID(ctx))
+	execution := engine.ExecutionContext(ctx)
+	req.Header.Set("X-Agentic-Run-ID", execution.RunID)
+	req.Header.Set("X-Agentic-Epoch", strconv.FormatInt(execution.Epoch, 10))
 	if t.spec.TokenEnv != "" {
 		token := os.Getenv(t.spec.TokenEnv)
 		if token == "" {

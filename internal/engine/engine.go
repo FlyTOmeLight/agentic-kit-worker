@@ -60,10 +60,21 @@ func decode(run *durable.Run) (State, error) {
 }
 
 type operationKey struct{}
+type executionKey struct{}
+type Execution struct {
+	RunID string
+	Epoch int64
+}
+
+func ExecutionContext(ctx context.Context) Execution {
+	v, _ := ctx.Value(executionKey{}).(Execution)
+	return v
+}
 
 // OperationID is stable across worker attempts. Idempotent adapters MUST forward it to the downstream service.
 func OperationID(ctx context.Context) string { s, _ := ctx.Value(operationKey{}).(string); return s }
 func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
+	ctx = context.WithValue(ctx, executionKey{}, Execution{RunID: run.ID, Epoch: run.Epoch})
 	state, err := decode(run)
 	if err != nil {
 		return err

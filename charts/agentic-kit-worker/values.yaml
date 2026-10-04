@@ -1,0 +1,6 @@
+image:
+  repository: agentic-kit-worker
+  tag: dev
+  pullPolicy: IfNotPresent
+existingSecret: ""
+replicas: 1
