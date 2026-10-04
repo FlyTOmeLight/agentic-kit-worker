@@ -73,8 +73,9 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 	defer close(releaseBlocked)
 	spec := durable.Spec{AgentID: "agent", ConfigVersion: "v1", Query: "do work", MaxTurns: 4, Model: durable.ModelSpec{Name: "test-model", BaseURL: upstream.URL + "/v1"}, Tools: []durable.ToolSpec{{Name: "submit", URL: upstream.URL + "/tool", Policy: durable.Idempotent, Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}}}
 	token := "test-token-with-at-least-24-characters"
-	apiURL := startAPI(t, binary, dsn, token, spec)
-	request, err := http.NewRequestWithContext(ctx, "POST", apiURL+"/v1/runs", strings.NewReader(`{"agentID":"agent","sessionID":"session","query":"do work"}`))
+	apiURL := startAPI(t, binary, dsn, token)
+	session := configureConversation(t, apiURL, token, spec)
+	request, err := http.NewRequestWithContext(ctx, "POST", apiURL+"/v1/sessions/"+session.ID+"/messages", strings.NewReader(`{"query":"do work"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +139,18 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 	if result == nil || result.Status != durable.Completed || result.Output != "report completed" || result.Epoch != 2 || toolCalls.Load() != 1 {
 		t.Fatalf("result=%+v tools=%d models=%d", result, toolCalls.Load(), modelCalls.Load())
 	}
+	messages, err := s.Messages(ctx, "owner", session.ID, 0, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 4 || messages[0].Kind != "User" || messages[1].Kind != "Assistant" || messages[2].Kind != "Tool" || messages[3].Kind != "Final" {
+		t.Fatalf("messages after recovery: %+v", messages)
+	}
+	for i, message := range messages {
+		if message.Seq != int64(i+1) || message.RunID != submitted.ID {
+			t.Fatalf("message identity changed: %+v", message)
+		}
+	}
 	// SSE is replayed from durable events after the worker has died, even with Redis unavailable.
 	request, err = http.NewRequestWithContext(ctx, "GET", apiURL+"/v1/runs/"+result.ID+"/events", nil)
 	if err != nil {
@@ -188,16 +201,8 @@ func buildAPI(t *testing.T) string {
 	return binary
 }
 
-func startAPI(t *testing.T, binary, dsn, token string, spec durable.Spec) string {
+func startAPI(t *testing.T, binary, dsn, token string) string {
 	t.Helper()
-	agents, err := json.Marshal([]any{map[string]any{"id": "agent", "owners": []string{"owner"}, "spec": spec}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "agents.json")
-	if err = os.WriteFile(path, agents, 0600); err != nil {
-		t.Fatal(err)
-	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -206,12 +211,12 @@ func startAPI(t *testing.T, binary, dsn, token string, spec durable.Spec) string
 	if err = listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	configPath := filepath.Join(filepath.Dir(path), "config.toml")
+	configPath := filepath.Join(t.TempDir(), "config.toml")
 	tokens, err := json.Marshal(map[string]string{token: "owner"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := fmt.Sprintf("[database]\nurl = %q\n[http]\nlisten_addr = %q\n[redis]\nurl = %q\n[agents]\nfile = %q\n[auth]\ntokens_json = %q\n", dsn, address, "redis://127.0.0.1:1/0", filepath.Base(path), string(tokens))
+	text := fmt.Sprintf("[database]\nurl = %q\n[http]\nlisten_addr = %q\n[redis]\nurl = %q\n[auth]\ntokens_json = %q\nconfig_owners = [\"owner\"]\n", dsn, address, "redis://127.0.0.1:1/0", string(tokens))
 	if err := os.WriteFile(configPath, []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +224,7 @@ func startAPI(t *testing.T, binary, dsn, token string, spec durable.Spec) string
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		switch key {
-		case "DATABASE_URL", "AGENTS_FILE", "API_TOKENS_JSON", "LISTEN_ADDR", "REDIS_URL", "CONFIG_FILE", "GIN_MODE":
+		case "DATABASE_URL", "CONFIG_OWNERS", "API_TOKENS_JSON", "LISTEN_ADDR", "REDIS_URL", "CONFIG_FILE", "GIN_MODE":
 			continue
 		}
 		cmd.Env = append(cmd.Env, entry)
@@ -256,4 +261,41 @@ func startAPI(t *testing.T, binary, dsn, token string, spec durable.Spec) string
 	output, _ := os.ReadFile(logPath)
 	t.Fatalf("API did not become ready: %s", output)
 	return ""
+}
+
+func configureConversation(t *testing.T, base, token string, spec durable.Spec) durable.Session {
+	t.Helper()
+	call := func(path string, input any, output any, want int) {
+		t.Helper()
+		data, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err := http.NewRequest("POST", base+path, strings.NewReader(string(data)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		client := http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != want {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("%s: %d %s", path, resp.StatusCode, body)
+		}
+		if err = json.NewDecoder(resp.Body).Decode(output); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var a durable.Agent
+	call("/v1/agents", map[string]any{"name": "test", "config": durable.AgentConfig{SystemPrompt: spec.SystemPrompt, Model: spec.Model, Tools: spec.Tools, MaxTurns: spec.MaxTurns}}, &a, 201)
+	var v durable.AgentVersion
+	call("/v1/agents/"+a.ID+"/publish", map[string]any{"revision": a.Revision}, &v, 200)
+	var session durable.Session
+	call("/v1/sessions", map[string]any{"agentID": a.ID}, &session, 201)
+	return session
 }

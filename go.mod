@@ -3,7 +3,7 @@ module github.com/FlyTOmeLight/agentic-kit-worker
 go 1.25.1
 
 require (
-	github.com/FlyTOmeLight/agentic-kit-api v0.1.4
+	github.com/FlyTOmeLight/agentic-kit-api v0.2.0
 	github.com/cloudwego/eino v0.9.2
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/eino-contrib/jsonschema v1.0.3

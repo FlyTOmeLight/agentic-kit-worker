@@ -2,7 +2,7 @@
 
 独立部署的 Agent 执行进程。从 PostgreSQL 领取任务，调用 Eino 模型和工具，在模型决策与工具结果之间保存状态；进程重启后，其他实例可以接管同一任务。
 
-与 `agentic-kit-api` 仓库配套。运行方式见 [API 启动说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/README.md)。Go module 引用 GitHub 上 API 的 `v0.1.4` 版本，可独立克隆和构建；私有模块认证与可选 go work 联合开发见 API 启动说明。
+与 `agentic-kit-api` 仓库配套。运行方式见 [API 启动说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/README.md)。Go module 引用 GitHub 上 API 的 `v0.2.0` 版本，可独立克隆和构建；私有模块认证与可选 go work 联合开发见 API 启动说明。
 
 ## 项目结构
 
@@ -11,8 +11,8 @@
 ## 执行规则
 
 1. 数据库行锁领取任务，递增 epoch；定期续期，失去执行权立即取消本地执行。
-2. 完整保存模型回复、工具名称和参数后，才执行工具。
-3. 调用工具前保存 Started 意图；成功后，在同一事务里保存工具结果、上下文和事件。
+2. 完整保存模型回复、工具名称和参数，并写入会话消息后，才执行工具。
+3. 调用工具前保存 Started 意图；成功后，在同一事务里保存工具结果、上下文、会话消息和事件。
 4. 重启后加载已保存上下文。已经完成的工具不会再次执行；未完成的模型调用可能重新生成。
 5. 只读工具允许重试；幂等工具携带跨执行批次不变的操作编号；不安全工具遇到不明确结果转 NeedsReview。
 6. 澄清问题保存为 WaitingClarification，不占用 worker；回答入库后重新排队。
@@ -52,3 +52,5 @@ make integration
 `TestProcessKillResumesWithoutRepeatingTool` 会通过真实 HTTP API 提交任务，启动独立子进程 worker，在工具结果保存后强制杀掉该进程，再启动替代执行者。它检查 runID 不变、epoch 增加、工具调用仅一次、任务最终完成，并验证无 Redis 情况下的 SSE 回放。模型和工具服务是受控 HTTP 测试服务，不调用付费模型。
 
 [完整迁移范围](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/migration.md) · [故障语义](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/design.md)
+
+Agent 定义通过 API 管理和发布。worker 始终读取 Run 快照，编辑草稿或发布新版本不会改变正在执行的任务。v0.2 需要配套的新会话存储，升级范围见 API README；不与 v0.1 API 混用。

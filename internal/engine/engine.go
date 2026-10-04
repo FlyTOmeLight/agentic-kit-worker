@@ -176,7 +176,11 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 			return e.Store.Save(ctx, lease, encode(state), durable.Completed, msg.Content, "", "RunCompleted")
 		}
 		// Persist the model's chosen tool arguments BEFORE any external side effect.
-		if err = e.Store.Save(ctx, lease, encode(state), durable.Running, msg.Content, "", "ModelCompleted"); err != nil {
+		decision := durable.Message{Role: "assistant", Content: msg.Content}
+		for _, call := range msg.ToolCalls {
+			decision.ToolCalls = append(decision.ToolCalls, durable.ToolCall{ID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments})
+		}
+		if err = e.Store.SaveDecision(ctx, lease, encode(state), decision); err != nil {
 			return err
 		}
 	}

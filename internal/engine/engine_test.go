@@ -88,7 +88,19 @@ func toolReply(name string) *schema.Message {
 }
 func submit(t *testing.T, s *durable.Store, name string, policy durable.Policy) *durable.Run {
 	t.Helper()
-	r, _, err := s.Create(context.Background(), "owner", durable.NewID(), durable.NewID(), durable.Spec{Query: "do work", MaxTurns: 5, Tools: []durable.ToolSpec{{Name: name, Policy: policy}}}, time.Hour, 4)
+	ctx := context.Background()
+	a, err := s.CreateAgent(ctx, "owner", "test", durable.AgentConfig{Model: durable.ModelSpec{Name: "test", BaseURL: "http://localhost:11434/v1"}, MaxTurns: 5, Tools: []durable.ToolSpec{{Name: name, Policy: policy, URL: "http://localhost/tool", Parameters: json.RawMessage(`{"type":"object"}`)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.PublishAgent(ctx, "owner", a.ID, a.Revision); err != nil {
+		t.Fatal(err)
+	}
+	session, err := s.CreateSession(ctx, "owner", a.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := s.Submit(ctx, "owner", session.ID, durable.NewID(), "do work", time.Hour, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
