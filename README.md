@@ -2,7 +2,7 @@
 
 独立部署的 Agent 执行进程。从 PostgreSQL 领取任务，调用 Eino 模型和工具，在模型决策与工具结果之间保存状态；进程重启后，其他实例可以接管同一任务。
 
-与 `agentic-kit-api` 仓库配套。运行方式见 [API 启动说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/README.md)。Go module 引用 GitHub 上 API 的 `v0.2.1` 版本，可独立克隆和构建；私有模块认证与可选 go work 联合开发见 API 启动说明。
+与 `agentic-kit-api` 仓库配套。运行方式见 [API 启动说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/README.md)。Go module 引用 GitHub 上 API 的 `v0.2.2` 版本，可独立克隆和构建；私有模块认证与可选 go work 联合开发见 API 启动说明。
 
 ## 项目结构
 
