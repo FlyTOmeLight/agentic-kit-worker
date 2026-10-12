@@ -1,9 +1,12 @@
+# syntax=docker/dockerfile:1
 FROM golang:1.27.1-alpine AS build
+RUN apk add --no-cache git
+ENV GOPRIVATE=github.com/FlyTOmeLight/*
 WORKDIR /src
 COPY go.mod go.sum ./
-COPY . .
-COPY --from=agentic_api / /agentic-api
-RUN go work init . /agentic-api && go mod download
+RUN --mount=type=secret,id=github_netrc,target=/root/.netrc,required=true go mod download
+COPY cmd ./cmd
+COPY internal ./internal
 RUN CGO_ENABLED=0 go build -tags=nomsgpack -trimpath -ldflags="-s -w" -o /worker ./cmd/worker
 FROM scratch
 COPY --from=build /worker /worker

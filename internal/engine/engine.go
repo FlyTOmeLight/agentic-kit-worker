@@ -1,5 +1,4 @@
-// Package engine persists the ReAct loop at model/tool boundaries. Eino remains the model/tool interface;
-// an ADK clarification checkpoint alone does not capture arbitrary process failures.
+// Package engine connects Eino ADK execution to the platform's task leases and storage.
 package engine
 
 import (
@@ -7,56 +6,29 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
 type Binding struct {
-	Tool   tool.InvokableTool
-	Policy durable.Policy
+	EndRun   bool
+	Validate func(string) error
+	Tool     tool.InvokableTool
+	Policy   durable.Policy
 }
 
-// Build must resolve the immutable run configuration, never the latest editable agent configuration.
+// Build resolves only the immutable configuration accepted for this run.
 type Build func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]Binding, error)
 type Engine struct {
 	Store *durable.Store
 	Build Build
-}
-type State struct {
-	Version     int               `json:"version"`
-	Messages    []*schema.Message `json:"messages"`
-	Turn        int               `json:"turn"`
-	Pending     []schema.ToolCall `json:"pending,omitempty"`
-	NextTool    int               `json:"nextTool"`
-	WaitingStep string            `json:"waitingStep,omitempty"`
-}
-
-func encode(s State) json.RawMessage {
-	b, err := json.Marshal(s)
-	if err != nil {
-		panic(err)
-	}
-	return b
-}
-func decode(run *durable.Run) (State, error) {
-	var state State
-	if err := json.Unmarshal(run.State, &state); err != nil {
-		return state, err
-	}
-	if state.Version == 0 {
-		state = State{Version: 1, Messages: []*schema.Message{schema.SystemMessage(run.Spec.SystemPrompt)}}
-		for _, msg := range run.Spec.History {
-			state.Messages = append(state.Messages, &schema.Message{Role: schema.RoleType(msg.Role), Content: msg.Content})
-		}
-		state.Messages = append(state.Messages, schema.UserMessage(run.Spec.Query))
-	} else if state.Version != 1 {
-		return state, fmt.Errorf("unsupported checkpoint version %d", state.Version)
-	}
-	return state, nil
 }
 
 type operationKey struct{}
@@ -71,128 +43,141 @@ func ExecutionContext(ctx context.Context) Execution {
 	return v
 }
 
-// OperationID is stable across worker attempts. Idempotent adapters MUST forward it to the downstream service.
-func OperationID(ctx context.Context) string { s, _ := ctx.Value(operationKey{}).(string); return s }
+// OperationID remains stable across worker attempts and Eino checkpoint resumes.
+func OperationID(ctx context.Context) string {
+	v, _ := ctx.Value(operationKey{}).(string)
+	return v
+}
+
 func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 	ctx = context.WithValue(ctx, executionKey{}, Execution{RunID: run.ID, Epoch: run.Epoch})
-	state, err := decode(run)
-	if err != nil {
+	s := &execution{store: e.Store, run: run}
+	if err := json.Unmarshal(run.State, &s.state); err != nil {
 		return err
 	}
-	lease := run.Lease()
+	if s.state.Version != 0 && s.state.Version != 2 {
+		return e.Store.Save(ctx, run.Lease(), run.State, durable.Failed, "", "unsupported execution state; drain legacy runs before upgrading the worker", "RunFailed")
+	}
+	s.state.Version = 2
 	llm, bindings, err := e.Build(ctx, run.Spec)
 	if err != nil {
-		return e.Store.Save(ctx, lease, encode(state), durable.Failed, "", err.Error(), "RunFailed")
+		return s.fail(ctx, err)
 	}
-	infos := make([]*schema.ToolInfo, 0, len(run.Spec.Tools))
+	var tools []tool.BaseTool
+	returnDirectly := make(map[string]bool)
 	for _, spec := range run.Spec.Tools {
 		binding, ok := bindings[spec.Name]
-		if !ok {
-			return fmt.Errorf("tool not bound: %s", spec.Name)
+		if !ok || binding.Policy != spec.Policy {
+			return s.fail(ctx, fmt.Errorf("tool binding mismatch: %s", spec.Name))
 		}
-		if binding.Policy != spec.Policy {
-			return fmt.Errorf("tool policy mismatch: %s", spec.Name)
-		}
-		info, err := binding.Tool.Info(ctx)
-		if err != nil {
-			return err
-		}
-		infos = append(infos, info)
-	}
-	if len(infos) > 0 {
-		llm, err = llm.WithTools(infos)
-		if err != nil {
-			return err
+		tools = append(tools, binding.Tool)
+		if spec.ReturnDirectly || binding.EndRun {
+			returnDirectly[spec.Name] = true
 		}
 	}
-	for {
-		if err = ctx.Err(); err != nil {
-			return err
+	if len(run.Spec.Toolsets) > 0 {
+		configured := map[string]bool{}
+		for _, t := range run.Spec.Tools {
+			configured[t.Name] = true
 		}
-		// Complete persisted model decisions before asking the model to make new ones.
-		for state.NextTool < len(state.Pending) {
-			call := state.Pending[state.NextTool]
-			binding, ok := bindings[call.Function.Name]
-			if !ok {
-				return e.Store.Save(ctx, lease, encode(state), durable.Failed, "", "model requested unknown tool: "+call.Function.Name, "RunFailed")
+		names := make([]string, 0, len(bindings))
+		for name := range bindings {
+			if !configured[name] && bindings[name].Tool != nil {
+				names = append(names, name)
 			}
-			input := call.Function.Name + "\x00" + call.Function.Arguments
-			result, cached, err := e.Store.BeginStep(ctx, lease, call.ID, input, binding.Policy)
-			if errors.Is(err, durable.ErrUncertain) {
-				state.WaitingStep = call.ID
-				return e.Store.Save(ctx, lease, encode(state), durable.NeedsReview, "", "tool outcome unknown: "+call.Function.Name, "RunNeedsReview")
-			}
-			if err != nil {
-				return err
-			}
-			if !cached && call.Function.Name == "ask_for_clarification" {
-				state.WaitingStep = call.ID
-				return e.Store.Save(ctx, lease, encode(state), durable.WaitingClarification, "", call.Function.Arguments, "ClarificationRequested")
-			}
-			if !cached {
-				toolCtx := context.WithValue(ctx, operationKey{}, run.ID+":"+call.ID)
-				result, err = binding.Tool.InvokableRun(toolCtx, call.Function.Arguments)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			tools = append(tools, bindings[name].Tool)
+		}
+	}
+	bindings[invalidInputTool] = Binding{Policy: durable.ReadOnly}
+	s.bindings = bindings
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:          "agent",
+		Instruction:   run.Spec.SystemPrompt,
+		Model:         llm,
+		MaxIterations: run.Spec.MaxTurns,
+		// Published prompts are literal text, not templates.
+		GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
+			return append([]*schema.Message{schema.SystemMessage(instruction)}, input.Messages...), nil
+		},
+		ToolsConfig: adk.ToolsConfig{ReturnDirectly: returnDirectly, ToolsNodeConfig: compose.ToolsNodeConfig{
+			Tools: tools, ExecuteSequentially: true,
+			UnknownToolsHandler: func(ctx context.Context, name, args string) (string, error) {
+				if name != invalidInputTool {
+					return "", fmt.Errorf("unknown tool: %s", name)
+				}
+				out, err := s.wrapTool(func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+					return &compose.ToolOutput{Result: input.Arguments}, nil
+				})(ctx, &compose.ToolInput{Name: name, Arguments: args, CallID: compose.GetToolCallID(ctx)})
 				if err != nil {
-					if ctx.Err() != nil {
-						return ctx.Err()
-					}
-					if binding.Policy == durable.Unsafe {
-						state.WaitingStep = call.ID
-						return e.Store.Save(ctx, lease, encode(state), durable.NeedsReview, "", err.Error(), "RunNeedsReview")
-					}
-					return e.Store.Retry(ctx, lease, encode(state), err.Error(), time.Second*time.Duration(run.Attempt))
+					return "", err
+				}
+				return out.Result, nil
+			},
+			ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: s.wrapTool}},
+		}},
+		Handlers: []adk.ChatModelAgentMiddleware{s},
+	})
+	if err != nil {
+		return s.fail(ctx, err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, CheckPointStore: s})
+	var iter *adk.AsyncIterator[*adk.AgentEvent]
+	if len(s.state.Checkpoint) > 0 {
+		iter, err = runner.Resume(ctx, run.ID)
+	} else {
+		var messages []*schema.Message
+		for _, msg := range run.Spec.History {
+			messages = append(messages, &schema.Message{Role: schema.RoleType(msg.Role), Content: msg.Content})
+		}
+		messages = append(messages, schema.UserMessage(run.Spec.Query))
+		iter = runner.Run(ctx, messages, adk.WithCheckPointID(run.ID))
+	}
+	// Eino owns the ReAct loop. This loop consumes events and resumes automatic
+	// tool-boundary checkpoints after their database transaction has committed.
+	for err == nil {
+		var interrupted bool
+		var final *schema.Message
+		for event, ok := iter.Next(); ok; event, ok = iter.Next() {
+			if event.Err != nil && err == nil {
+				err = event.Err
+			}
+			if event.Action != nil && event.Action.Interrupted != nil {
+				interrupted = true
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				msg := event.Output.MessageOutput.Message
+				if msg != nil && ((msg.Role == schema.Assistant && len(msg.ToolCalls) == 0) || (msg.Role == schema.Tool && (returnDirectly[msg.ToolName] || bindings[msg.ToolName].EndRun) && !toolHasError(msg.Content))) {
+					final = msg
 				}
 			}
-			state.Messages = append(state.Messages, schema.ToolMessage(result, call.ID))
-			state.NextTool++
-			state.WaitingStep = ""
-			if cached {
-				err = e.Store.Save(ctx, lease, encode(state), durable.Running, "", "", "ToolResultRestored")
-			} else {
-				err = e.Store.FinishStep(ctx, lease, call.ID, result, encode(state))
-			}
-			if err != nil {
-				return err
-			}
 		}
-		if state.Turn >= run.Spec.MaxTurns {
-			return e.Store.Save(ctx, lease, encode(state), durable.Failed, "", "maximum model turns exceeded", "RunFailed")
+		// Drain the iterator before returning: no ADK goroutine may outlive this lease.
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		state.Pending = nil
-		state.NextTool = 0
-		msg, err := llm.Generate(ctx, state.Messages)
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return e.Store.Retry(ctx, lease, encode(state), err.Error(), time.Second*time.Duration(run.Attempt))
+			break
 		}
-		if msg == nil {
-			return e.Store.Save(ctx, lease, encode(state), durable.Failed, "", "model returned no message", "RunFailed")
+		if s.pauseStatus != "" {
+			return nil
+		} // Set atomically saved pause and checkpoint.
+		if interrupted {
+			iter, err = runner.Resume(ctx, run.ID)
+			continue
 		}
-		if msg.ResponseMeta != nil && (msg.ResponseMeta.FinishReason == "length" || msg.ResponseMeta.FinishReason == "content_filter") {
-			return e.Store.Save(ctx, lease, encode(state), durable.Failed, "", "incomplete model response: "+msg.ResponseMeta.FinishReason, "RunFailed")
+		if final == nil {
+			return s.fail(ctx, errors.New("Eino runner ended without a final response"))
 		}
-		state.Turn++
-		// Stable local IDs avoid missing/duplicate provider tool IDs and survive every recovery attempt.
-		for i := range msg.ToolCalls {
-			msg.ToolCalls[i].ID = fmt.Sprintf("turn_%d_tool_%d", state.Turn, i)
-			if !json.Valid([]byte(msg.ToolCalls[i].Function.Arguments)) {
-				return e.Store.Save(ctx, lease, encode(state), durable.Failed, "", "invalid tool arguments", "RunFailed")
-			}
-		}
-		state.Messages = append(state.Messages, msg)
-		state.Pending = msg.ToolCalls
-		if len(msg.ToolCalls) == 0 {
-			return e.Store.Save(ctx, lease, encode(state), durable.Completed, msg.Content, "", "RunCompleted")
-		}
-		// Persist the model's chosen tool arguments BEFORE any external side effect.
-		decision := durable.Message{Role: "assistant", Content: msg.Content}
-		for _, call := range msg.ToolCalls {
-			decision.ToolCalls = append(decision.ToolCalls, durable.ToolCall{ID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments})
-		}
-		if err = e.Store.SaveDecision(ctx, lease, encode(state), decision); err != nil {
-			return err
-		}
+		return e.Store.Save(ctx, run.Lease(), s.encode(), durable.Completed, final.Content, "", "RunCompleted")
 	}
+	if errors.Is(err, durable.ErrLeaseLost) || ctx.Err() != nil {
+		return err
+	}
+	if s.retry {
+		return e.Store.Retry(ctx, run.Lease(), s.encode(), err.Error(), time.Second*time.Duration(run.Attempt))
+	}
+	return s.fail(ctx, err)
 }

@@ -3,7 +3,7 @@ module github.com/FlyTOmeLight/agentic-kit-worker
 go 1.25.1
 
 require (
-	github.com/FlyTOmeLight/agentic-kit-api v0.3.1
+	github.com/FlyTOmeLight/agentic-kit-api v0.4.0
 	github.com/cloudwego/eino v0.9.2
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/eino-contrib/jsonschema v1.0.3
@@ -14,6 +14,12 @@ require (
 )
 
 require (
+	github.com/bmatcuk/doublestar/v4 v4.10.0 // indirect
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
+)
+
+require (
+	github.com/agent-infra/sandbox-sdk-go v0.0.5
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
