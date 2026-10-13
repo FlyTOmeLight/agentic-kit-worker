@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,10 +24,11 @@ func clearEnv(t *testing.T, keys ...string) {
 		})
 	}
 }
+
 func writeConfig(t *testing.T, text string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -45,7 +47,8 @@ poll = "20ms"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Worker.Concurrency != 2 || cfg.Worker.Lease != 900*time.Millisecond || cfg.Worker.Poll != 20*time.Millisecond {
+	if cfg.Worker.Concurrency != 2 || cfg.Worker.Lease != 900*time.Millisecond ||
+		cfg.Worker.Poll != 20*time.Millisecond {
 		t.Fatal("TOML settings not loaded")
 	}
 	t.Setenv("WORKER_CONCURRENCY", "6")
@@ -58,6 +61,7 @@ poll = "20ms"
 		t.Fatal("env override failed")
 	}
 }
+
 func TestWorkerDefaultsAndFailures(t *testing.T) {
 	clearEnv(t, "DATABASE_URL", "WORKER_CONCURRENCY", "WORKER_LEASE", "WORKER_POLL")
 	t.Setenv("DATABASE_URL", "postgres://localhost/db")
@@ -69,9 +73,12 @@ func TestWorkerDefaultsAndFailures(t *testing.T) {
 		t.Fatal("defaults not loaded")
 	}
 	for _, tc := range []struct{ name, key, value string }{
-		{"zero concurrency", "WORKER_CONCURRENCY", "0"}, {"invalid integer", "WORKER_CONCURRENCY", "bad"},
-		{"short lease", "WORKER_LEASE", "1ms"}, {"invalid duration", "WORKER_LEASE", "bad"},
-		{"zero poll", "WORKER_POLL", "0s"}, {"empty database", "DATABASE_URL", ""},
+		{name: "zero concurrency", key: "WORKER_CONCURRENCY", value: "0"},
+		{name: "invalid integer", key: "WORKER_CONCURRENCY", value: "bad"},
+		{name: "short lease", key: "WORKER_LEASE", value: "1ms"},
+		{name: "invalid duration", key: "WORKER_LEASE", value: "bad"},
+		{name: "zero poll", key: "WORKER_POLL", value: "0s"},
+		{name: "empty database", key: "DATABASE_URL", value: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(tc.key, tc.value)
@@ -85,5 +92,49 @@ func TestWorkerDefaultsAndFailures(t *testing.T) {
 	}
 	if _, err := Load(filepath.Join(t.TempDir(), "missing.toml")); err == nil {
 		t.Fatal("explicit missing file accepted")
+	}
+}
+
+func TestFrameworkSnapshot(t *testing.T) {
+	clearEnv(
+		t,
+		"DATABASE_URL",
+		"WORKER_CONCURRENCY",
+		"WORKER_LEASE",
+		"WORKER_POLL",
+		"LISTEN_ADDR",
+		"GIN_MODE",
+		"SERVER_CONFIG_PATH",
+	)
+	t.Setenv("TEST_WORKER_DSN", "postgres://localhost/db")
+	t.Setenv("LISTEN_ADDR", "127.0.0.1:9101")
+	t.Setenv("SERVER_CONFIG_PATH", writeConfig(t, `[database]
+url = "${env:TEST_WORKER_DSN}"
+[HTTPServer]
+Listen = "127.0.0.1:9001"
+`))
+	cfg, manager, err := LoadManager("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close(context.Background())
+	var decoded Config
+	if err := manager.Snapshot().Unmarshal(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Database != cfg.Database || decoded.Worker != cfg.Worker ||
+		decoded.HTTPServer.Listen != cfg.HTTPServer.Listen ||
+		cfg.HTTPServer.Listen != "127.0.0.1:9101" {
+		t.Fatal("application and host snapshots differ")
+	}
+	for _, tc := range []struct{ key, value string }{
+		{key: "LISTEN_ADDR", value: "bad"}, {key: "LISTEN_ADDR", value: "127.0.0.1:65536"}, {key: "GIN_MODE", value: "invalid"},
+	} {
+		t.Run(tc.key+tc.value, func(t *testing.T) {
+			t.Setenv(tc.key, tc.value)
+			if _, _, err := LoadManager(""); err == nil {
+				t.Fatal("invalid framework setting accepted")
+			}
+		})
 	}
 }

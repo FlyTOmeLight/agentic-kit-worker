@@ -30,16 +30,27 @@ func NewWithClient(endpoint, token, root string, httpClient *http.Client) (*Back
 	if endpoint == "" || token == "" || !path.IsAbs(root) {
 		return nil, errors.New("AIO endpoint, credential and absolute workspace are required")
 	}
-	return &Backend{client: client.NewClient(option.WithBaseURL(endpoint), option.WithHTTPHeader(http.Header{"Authorization": []string{"Bearer " + token}}), option.WithMaxAttempts(1), option.WithHTTPClient(httpClient)), root: path.Clean(root)}, nil
+	return &Backend{
+		client: client.NewClient(
+			option.WithBaseURL(endpoint),
+			option.WithHTTPHeader(http.Header{"Authorization": []string{"Bearer " + token}}),
+			option.WithMaxAttempts(1),
+			option.WithHTTPClient(httpClient),
+		),
+		root: path.Clean(root),
+	}, nil
 }
 
 // InputError means a request was rejected or no mutation was made. Transport
 // errors retain their identity and cannot be treated as a known-safe failure.
 type InputError struct{ Message string }
 
-func (e *InputError) Error() string     { return e.Message }
+func (e *InputError) Error() string { return e.Message }
+
 func (e *InputError) Correctable() bool { return true }
-func invalid(message string) error      { return &InputError{message} }
+
+func invalid(message string) error { return &InputError{Message: message} }
+
 func checked(ok *bool, message *string, err error) error {
 	if err != nil {
 		var apiErr *core.APIError
@@ -53,13 +64,16 @@ func checked(ok *bool, message *string, err error) error {
 	}
 	return nil
 }
+
 func value(p *string) string {
 	if p == nil {
 		return ""
 	}
 	return *p
 }
+
 func ptr[T any](v T) *T { return &v }
+
 func (b *Backend) resolve(raw string) (string, error) {
 	if raw == "" {
 		raw = "."
@@ -73,6 +87,7 @@ func (b *Backend) resolve(raw string) (string, error) {
 	}
 	return p, nil
 }
+
 func (b *Backend) Read(ctx context.Context, r *filesystem.ReadRequest) (*filesystem.FileContent, error) {
 	p, err := b.resolve(r.FilePath)
 	if err != nil {
@@ -101,6 +116,7 @@ func (b *Backend) Read(ctx context.Context, r *filesystem.ReadRequest) (*filesys
 	}
 	return &filesystem.FileContent{Content: out.Data.Content}, nil
 }
+
 func (b *Backend) Write(ctx context.Context, r *filesystem.WriteRequest) error {
 	p, err := b.resolve(r.FilePath)
 	if err != nil {
@@ -115,6 +131,7 @@ func (b *Backend) Write(ctx context.Context, r *filesystem.WriteRequest) error {
 	}
 	return checked(out.Success, out.Message, nil)
 }
+
 func (b *Backend) Edit(ctx context.Context, r *filesystem.EditRequest) error {
 	if r.OldString == "" {
 		return invalid("old string must be non-empty")
@@ -133,12 +150,16 @@ func (b *Backend) Edit(ctx context.Context, r *filesystem.EditRequest) error {
 	if err != nil {
 		return err
 	}
-	out, err := b.client.File.ReplaceInFile(ctx, &api.FileReplaceRequest{File: p, OldStr: r.OldString, NewStr: r.NewString})
+	out, err := b.client.File.ReplaceInFile(
+		ctx,
+		&api.FileReplaceRequest{File: p, OldStr: r.OldString, NewStr: r.NewString},
+	)
 	if err != nil {
 		return checked(nil, nil, err)
 	}
 	return checked(out.Success, out.Message, nil)
 }
+
 func (b *Backend) LsInfo(ctx context.Context, r *filesystem.LsInfoRequest) ([]filesystem.FileInfo, error) {
 	p, err := b.resolve(r.Path)
 	if err != nil {
@@ -163,10 +184,19 @@ func (b *Backend) LsInfo(ctx context.Context, r *filesystem.LsInfoRequest) ([]fi
 		if f.Size != nil {
 			size = int64(*f.Size)
 		}
-		files = append(files, filesystem.FileInfo{Path: f.Path, IsDir: f.IsDirectory, Size: size, ModifiedAt: value(f.ModifiedTime)})
+		files = append(
+			files,
+			filesystem.FileInfo{
+				Path:       f.Path,
+				IsDir:      f.IsDirectory,
+				Size:       size,
+				ModifiedAt: value(f.ModifiedTime),
+			},
+		)
 	}
 	return files, nil
 }
+
 func (b *Backend) GlobInfo(ctx context.Context, r *filesystem.GlobInfoRequest) ([]filesystem.FileInfo, error) {
 	p, err := b.resolve(r.Path)
 	if err != nil {
@@ -188,12 +218,21 @@ func (b *Backend) GlobInfo(ctx context.Context, r *filesystem.GlobInfoRequest) (
 	}
 	return files, nil
 }
+
 func (b *Backend) GrepRaw(ctx context.Context, r *filesystem.GrepRequest) ([]filesystem.GrepMatch, error) {
 	p, err := b.resolve(r.Path)
 	if err != nil {
 		return nil, err
 	}
-	input := &api.FileGrepRequest{Path: p, Pattern: r.Pattern, CaseInsensitive: &r.CaseInsensitive, Multiline: &r.EnableMultiline, ContextBefore: &r.BeforeLines, ContextAfter: &r.AfterLines, MaxResults: ptr(200)}
+	input := &api.FileGrepRequest{
+		Path:            p,
+		Pattern:         r.Pattern,
+		CaseInsensitive: &r.CaseInsensitive,
+		Multiline:       &r.EnableMultiline,
+		ContextBefore:   &r.BeforeLines,
+		ContextAfter:    &r.AfterLines,
+		MaxResults:      ptr(200),
+	}
 	if r.Glob != "" {
 		input.Include = []string{r.Glob}
 	}
@@ -213,11 +252,15 @@ func (b *Backend) GrepRaw(ctx context.Context, r *filesystem.GrepRequest) ([]fil
 	matches := make([]filesystem.GrepMatch, 0, len(out.Data.Matches))
 	for _, m := range out.Data.Matches {
 		if m != nil {
-			matches = append(matches, filesystem.GrepMatch{Path: m.File, Line: m.LineNumber, Content: m.LineContent})
+			matches = append(
+				matches,
+				filesystem.GrepMatch{Path: m.File, Line: m.LineNumber, Content: m.LineContent},
+			)
 		}
 	}
 	return matches, nil
 }
+
 func (b *Backend) Execute(ctx context.Context, r *filesystem.ExecuteRequest) (*filesystem.ExecuteResponse, error) {
 	if r.RunInBackendGround {
 		return nil, invalid("unmanaged background execution is disabled")
@@ -225,7 +268,17 @@ func (b *Backend) Execute(ctx context.Context, r *filesystem.ExecuteRequest) (*f
 	if strings.TrimSpace(r.Command) == "" {
 		return nil, invalid("command is required")
 	}
-	out, err := b.client.Bash.Exec(ctx, &api.BashExecRequest{Command: r.Command, Env: map[string]*string{"PYTHONDONTWRITEBYTECODE": ptr("1")}, ExecDir: &b.root, AsyncMode: ptr(true), HardTimeout: ptr(float64(120)), MaxOutputLength: ptr(24000)})
+	out, err := b.client.Bash.Exec(
+		ctx,
+		&api.BashExecRequest{
+			Command:         r.Command,
+			Env:             map[string]*string{"PYTHONDONTWRITEBYTECODE": ptr("1")},
+			ExecDir:         &b.root,
+			AsyncMode:       ptr(true),
+			HardTimeout:     ptr(float64(120)),
+			MaxOutputLength: ptr(24000),
+		},
+	)
 	if err != nil {
 		return nil, checked(nil, nil, err)
 	}
@@ -239,11 +292,24 @@ func (b *Backend) Execute(ctx context.Context, r *filesystem.ExecuteRequest) (*f
 	stdout, stderr := value(cmd.Stdout), value(cmd.Stderr)
 	truncated := false
 	for cmd.Status == api.CommandStatus("running") {
-		page, err := b.client.Bash.Output(ctx, &api.BashOutputRequest{SessionId: cmd.SessionId, CommandId: &cmd.CommandId, Offset: cmd.Offset, StderrOffset: cmd.StderrOffset, Wait: ptr(true), WaitTimeout: ptr(float64(1))})
+		page, err := b.client.Bash.Output(
+			ctx,
+			&api.BashOutputRequest{
+				SessionId:    cmd.SessionId,
+				CommandId:    &cmd.CommandId,
+				Offset:       cmd.Offset,
+				StderrOffset: cmd.StderrOffset,
+				Wait:         ptr(true),
+				WaitTimeout:  ptr(float64(1)),
+			},
+		)
 		if err != nil {
 			if ctx.Err() != nil {
 				stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-				_, stopErr := b.client.Bash.Kill(stopCtx, &api.BashKillRequest{SessionId: cmd.SessionId, Signal: ptr("SIGKILL")})
+				_, stopErr := b.client.Bash.Kill(
+					stopCtx,
+					&api.BashKillRequest{SessionId: cmd.SessionId, Signal: ptr("SIGKILL")},
+				)
 				cancel()
 				if stopErr != nil {
 					return nil, fmt.Errorf("AIO cancellation could not confirm stop: %w", stopErr)

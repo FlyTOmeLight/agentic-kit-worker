@@ -16,6 +16,14 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: [/worker]
+          ports: [{name: health, containerPort: 8081}]
+          env:
+            - name: LISTEN_ADDR
+              value: "0.0.0.0:8081"
+          readinessProbe:
+            httpGet: {path: /healthz, port: health}
+          livenessProbe:
+            httpGet: {path: /ping, port: health}
           envFrom: [{secretRef: {name: {{ required "existingSecret required" .Values.existingSecret }}}}]
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
           resources:

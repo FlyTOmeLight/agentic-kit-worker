@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
-	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+
+	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
 func testDB(t *testing.T) (*durable.Store, string) {
@@ -67,9 +68,15 @@ type fakeModel struct {
 func (m *fakeModel) Generate(ctx context.Context, in []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	return m.generate(ctx, in)
 }
-func (m *fakeModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+
+func (m *fakeModel) Stream(
+	context.Context,
+	[]*schema.Message,
+	...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
 	return nil, errors.New("not used")
 }
+
 func (m *fakeModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) { return m, nil }
 
 type fakeTool struct {
@@ -80,16 +87,44 @@ type fakeTool struct {
 func (t *fakeTool) Info(context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{Name: t.name}, nil
 }
+
 func (t *fakeTool) InvokableRun(ctx context.Context, args string, _ ...tool.Option) (string, error) {
 	return t.invoke(ctx, args)
 }
+
 func toolReply(name string) *schema.Message {
-	return &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "provider_id", Type: "function", Function: schema.FunctionCall{Name: name, Arguments: `{"question":"which version?"}`}}}}
+	return &schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{
+			{
+				ID:       "provider_id",
+				Type:     "function",
+				Function: schema.FunctionCall{Name: name, Arguments: `{"question":"which version?"}`},
+			},
+		},
+	}
 }
+
 func submit(t *testing.T, s *durable.Store, name string, policy durable.Policy) *durable.Run {
 	t.Helper()
 	ctx := context.Background()
-	a, err := s.CreateAgent(ctx, "owner", "test", durable.AgentConfig{Model: durable.ModelSpec{Name: "test", BaseURL: "http://localhost:11434/v1"}, MaxTurns: 5, Tools: []durable.ToolSpec{{Name: name, Policy: policy, URL: "http://localhost/tool", Parameters: json.RawMessage(`{"type":"object"}`)}}})
+	a, err := s.CreateAgent(
+		ctx,
+		"owner",
+		"test",
+		durable.AgentConfig{
+			Model:    durable.ModelSpec{Name: "test", BaseURL: "http://localhost:11434/v1"},
+			MaxTurns: 5,
+			Tools: []durable.ToolSpec{
+				{
+					Name:       name,
+					Policy:     policy,
+					URL:        "http://localhost/tool",
+					Parameters: json.RawMessage(`{"type":"object"}`),
+				},
+			},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,6 +141,7 @@ func submit(t *testing.T, s *durable.Store, name string, policy durable.Policy) 
 	}
 	return r
 }
+
 func getClaim(t *testing.T, s *durable.Store) *durable.Run {
 	t.Helper()
 	r, err := s.Claim(context.Background(), durable.NewID(), time.Second)
@@ -114,6 +150,7 @@ func getClaim(t *testing.T, s *durable.Store) *durable.Run {
 	}
 	return r
 }
+
 func TestClarificationSurvivesNewEngine(t *testing.T) {
 	s, _ := testDB(t)
 	ctx := context.Background()
@@ -139,7 +176,14 @@ func TestClarificationSurvivesNewEngine(t *testing.T) {
 	if err != nil || paused.Status != durable.WaitingClarification {
 		t.Fatal(err)
 	}
-	if err = s.SupplyResult(ctx, "owner", r.ID, paused.WaitingStep, "version 2", durable.WaitingClarification); err != nil {
+	if err = s.SupplyResult(
+		ctx,
+		"owner",
+		r.ID,
+		paused.WaitingStep,
+		"version 2",
+		durable.WaitingClarification,
+	); err != nil {
 		t.Fatal(err)
 	}
 	other := &engine.Engine{Store: s, Build: build}
@@ -151,6 +195,7 @@ func TestClarificationSurvivesNewEngine(t *testing.T) {
 		t.Fatalf("%+v models=%d err=%v", done, models.Load(), err)
 	}
 }
+
 func TestIdempotentToolRetriesKeepOperationID(t *testing.T) {
 	s, _ := testDB(t)
 	ctx := context.Background()
@@ -203,13 +248,27 @@ func TestIdempotentToolRetriesKeepOperationID(t *testing.T) {
 		t.Fatalf("%+v %v", done, err)
 	}
 }
+
 func TestUnsafeErrorPausesInsteadOfRetrying(t *testing.T) {
 	s, _ := testDB(t)
 	ctx := context.Background()
 	r := submit(t, s, "submit", durable.Unsafe)
-	e := &engine.Engine{Store: s, Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
-		return &fakeModel{generate: func(context.Context, []*schema.Message) (*schema.Message, error) { return toolReply("submit"), nil }}, map[string]engine.Binding{"submit": {Policy: durable.Unsafe, Tool: &fakeTool{name: "submit", invoke: func(context.Context, string) (string, error) { return "", errors.New("unknown external outcome") }}}}, nil
-	}}
+	e := &engine.Engine{
+		Store: s,
+		Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+			return &fakeModel{
+				generate: func(context.Context, []*schema.Message) (*schema.Message, error) { return toolReply("submit"), nil },
+			}, map[string]engine.Binding{
+				"submit": {
+					Policy: durable.Unsafe,
+					Tool: &fakeTool{
+						name:   "submit",
+						invoke: func(context.Context, string) (string, error) { return "", errors.New("unknown external outcome") },
+					},
+				},
+			}, nil
+		},
+	}
 	if err := e.Execute(ctx, getClaim(t, s)); err != nil {
 		t.Fatal(err)
 	}

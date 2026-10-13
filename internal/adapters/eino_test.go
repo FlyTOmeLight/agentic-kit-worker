@@ -12,55 +12,77 @@ import (
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 )
 
-func TestAppForgeToolContracts(t *testing.T) {
-	cases := []struct{ kind, path, response, want string }{
-		{"AppForgeMCP", "/v1/RunMcpTool", `{"content":[{"type":"text","text":"ok"}],"isError":false}`, `[{"type":"text","text":"ok"}]`},
-		{"AppForgeOpenAPI", "/v1/RunTool", `{"success":true,"rawResponse":"ok"}`, "ok"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.kind, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != tc.path {
-					t.Errorf("path %s", r.URL.Path)
+func TestHTTPToolContract(t *testing.T) {
+	for _, kind := range []string{"", "HTTP"} {
+		t.Run("kind="+kind, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/tools/search" ||
+					r.Header.Get("Content-Type") != "application/json" {
+					t.Errorf("unexpected request: %s %s %v", r.Method, r.URL.Path, r.Header)
 				}
-				var body map[string]any
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					t.Error(err)
+				var body map[string]string
+				if err := json.NewDecoder(r.Body).
+					Decode(&body); err != nil || body["q"] != "value" ||
+					len(body) != 1 {
+					t.Errorf("arguments changed: %v, %v", body, err)
 				}
-				if tc.kind == "AppForgeMCP" {
-					if body["toolGroupID"] != "group" || body["slug"] != "tool" {
-						t.Errorf("body %#v", body)
-					}
-				} else {
-					if body["groupID"] != "group" || body["id"] != "tool" || body["parameters"] != `{"q":"value"}` || body["operation"] != float64(1) {
-						t.Errorf("body %#v", body)
-					}
-				}
-				fmt.Fprint(w, tc.response)
+				fmt.Fprint(w, `{"result":"ok"}`)
 			}))
-			defer srv.Close()
-			_, bindings, err := Build(context.Background(), durable.Spec{Model: durable.ModelSpec{Name: "model", BaseURL: srv.URL}, Tools: []durable.ToolSpec{{Name: "selected", Kind: tc.kind, URL: srv.URL, ResourceID: "group", ToolID: "tool", Policy: durable.ReadOnly, Parameters: json.RawMessage(`{"type":"object"}`)}}})
+			defer server.Close()
+			_, bindings, err := Build(
+				context.Background(),
+				durable.Spec{
+					Model: durable.ModelSpec{Name: "model", BaseURL: server.URL},
+					Tools: []durable.ToolSpec{
+						{
+							Name:       "search",
+							Kind:       kind,
+							URL:        server.URL + "/tools/search",
+							Policy:     durable.ReadOnly,
+							Parameters: json.RawMessage(`{"type":"object"}`),
+						},
+					},
+				},
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := bindings["selected"].Tool.InvokableRun(context.Background(), `{"q":"value"}`)
-			if err != nil || got != tc.want {
-				t.Fatalf("got %q err=%v", got, err)
+			got, err := bindings["search"].Tool.InvokableRun(context.Background(), `{"q":"value"}`)
+			if err != nil || got != `{"result":"ok"}` {
+				t.Fatalf("got %q, error %v", got, err)
 			}
 		})
 	}
 }
-func TestAppForgeBusinessErrorIsNotSuccess(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"isError":true,"content":"failed"}`) }))
-	defer srv.Close()
-	tool := &httpTool{spec: durable.ToolSpec{Kind: "AppForgeMCP", URL: srv.URL}, client: srv.Client()}
-	if _, err := tool.InvokableRun(context.Background(), `{}`); err == nil {
-		t.Fatal("business error accepted")
+
+func TestBuildRejectsUnsupportedToolKind(t *testing.T) {
+	_, _, err := Build(
+		context.Background(),
+		durable.Spec{
+			Model: durable.ModelSpec{Name: "model", BaseURL: "http://localhost"},
+			Tools: []durable.ToolSpec{
+				{
+					Name:       "search",
+					Kind:       "unsupported",
+					Policy:     durable.ReadOnly,
+					Parameters: json.RawMessage(`{"type":"object"}`),
+				},
+			},
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "unsupported tool kind") {
+		t.Fatalf("expected unsupported kind error, got %v", err)
 	}
 }
 
 func TestToolScopeComesFromFrozenRunNotModelArguments(t *testing.T) {
-	scope := durable.Scope{TenantID: "tenant", ProjectID: "project", ActorID: "actor", TaskID: "task", RoundID: "round"}
+	scope := durable.Scope{
+		TenantID:  "tenant",
+		ProjectID: "project",
+		ActorID:   "actor",
+		TaskID:    "task",
+		RoundID:   "round",
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var got durable.Scope
 		if err := json.Unmarshal([]byte(r.Header.Get("X-Agentic-Scope")), &got); err != nil || got != scope {
@@ -69,28 +91,56 @@ func TestToolScopeComesFromFrozenRunNotModelArguments(t *testing.T) {
 		fmt.Fprint(w, `{"ok":true}`)
 	}))
 	defer server.Close()
-	_, bindings, err := Build(context.Background(), durable.Spec{Scope: &scope, Model: durable.ModelSpec{Name: "model", BaseURL: server.URL}, Tools: []durable.ToolSpec{{Name: "read_file", URL: server.URL, Policy: durable.ReadOnly, Parameters: json.RawMessage(`{"type":"object"}`)}}})
+	_, bindings, err := Build(
+		context.Background(),
+		durable.Spec{
+			Scope: &scope,
+			Model: durable.ModelSpec{Name: "model", BaseURL: server.URL},
+			Tools: []durable.ToolSpec{
+				{
+					Name:       "read_file",
+					URL:        server.URL,
+					Policy:     durable.ReadOnly,
+					Parameters: json.RawMessage(`{"type":"object"}`),
+				},
+			},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = bindings["read_file"].Tool.InvokableRun(context.Background(), `{"roundID":"forged","path":"source.go"}`); err != nil {
+	if _, err = bindings["read_file"].Tool.InvokableRun(
+		context.Background(),
+		`{"roundID":"forged","path":"source.go"}`,
+	); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestHTTPToolRetainsStructuredFailureReason(t *testing.T) {
 	cases := []struct{ body, want string }{
-		{`{"error":"before must match exactly once"}`, "before must match exactly once"},
-		{`{"error":{"code":"EXECUTION_REVOKED","message":"execution stopped"}}`, "EXECUTION_REVOKED: execution stopped"},
-		{`<html>unavailable</html>`, "HTTP 409"},
+		{body: `{"error":"before must match exactly once"}`, want: "before must match exactly once"},
+		{
+			body: `{"error":{"code":"EXECUTION_REVOKED","message":"execution stopped"}}`,
+			want: "EXECUTION_REVOKED: execution stopped",
+		},
+		{body: `<html>unavailable</html>`, want: "HTTP 409"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.want, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(409); fmt.Fprint(w, tc.body) }))
+			server := httptest.NewServer(
+				http.HandlerFunc(
+					func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(409); fmt.Fprint(w, tc.body) },
+				),
+			)
 			defer server.Close()
-			tool := &httpTool{spec: durable.ToolSpec{Name: "edit_file", Kind: "HTTP", URL: server.URL}, client: server.Client()}
+			tool := &httpTool{
+				spec:   durable.ToolSpec{Name: "edit_file", Kind: "HTTP", URL: server.URL},
+				client: server.Client(),
+			}
 			_, err := tool.InvokableRun(context.Background(), `{}`)
-			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "edit_file") {
+			if err == nil || !strings.Contains(err.Error(), tc.want) ||
+				!strings.Contains(err.Error(), "edit_file") {
 				t.Fatalf("failure reason lost: %v", err)
 			}
 		})

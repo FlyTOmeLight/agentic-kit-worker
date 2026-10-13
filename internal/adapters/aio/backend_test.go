@@ -40,7 +40,10 @@ func TestAIOPublicSDKAndEinoTools(t *testing.T) {
 	if err = b.Ready(ctx); err != nil {
 		t.Fatal(err)
 	}
-	envResult, err := b.Execute(ctx, &fs.ExecuteRequest{Command: "python3 -c 'import sys; print(sys.dont_write_bytecode)'"})
+	envResult, err := b.Execute(
+		ctx,
+		&fs.ExecuteRequest{Command: "python3 -c 'import sys; print(sys.dont_write_bytecode)'"},
+	)
 	if err != nil || !strings.Contains(envResult.Output, "True") {
 		t.Fatalf("Python cache isolation: %+v %v", envResult, err)
 	}
@@ -74,7 +77,13 @@ func TestAIOPublicSDKAndEinoTools(t *testing.T) {
 		t.Fatalf("line range: %s", out)
 	}
 	call("edit_file", `{"file_path":"adapter-test.txt","old_string":"two","new_string":"three"}`)
-	if out := call("grep", `{"pattern":"three","glob":"adapter-test.txt","output_mode":"content"}`); !strings.Contains(out, "three") {
+	if out := call(
+		"grep",
+		`{"pattern":"three","glob":"adapter-test.txt","output_mode":"content"}`,
+	); !strings.Contains(
+		out,
+		"three",
+	) {
 		t.Fatalf("grep: %s", out)
 	}
 	if out := call("glob", `{"pattern":"adapter-test.txt"}`); !strings.Contains(out, "adapter-test") {
@@ -92,7 +101,13 @@ func TestAIOPublicSDKAndEinoTools(t *testing.T) {
 	if !errors.As(err, &invalid) {
 		t.Fatalf("missing path must be correctable: %v", err)
 	}
-	if err = b.Edit(ctx, &fs.EditRequest{FilePath: "adapter-test.txt", OldString: "not-present", NewString: "x"}); !errors.As(err, &invalid) {
+	if err = b.Edit(
+		ctx,
+		&fs.EditRequest{FilePath: "adapter-test.txt", OldString: "not-present", NewString: "x"},
+	); !errors.As(
+		err,
+		&invalid,
+	) {
 		t.Fatalf("unmatched edit: %v", err)
 	}
 }

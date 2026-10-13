@@ -26,13 +26,16 @@ type Binding struct {
 
 // Build resolves only the immutable configuration accepted for this run.
 type Build func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]Binding, error)
+
 type Engine struct {
 	Store *durable.Store
 	Build Build
 }
 
 type operationKey struct{}
+
 type executionKey struct{}
+
 type Execution struct {
 	RunID string
 	Epoch int64
@@ -56,7 +59,15 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 		return err
 	}
 	if s.state.Version != 0 && s.state.Version != 2 {
-		return e.Store.Save(ctx, run.Lease(), run.State, durable.Failed, "", "unsupported execution state; drain legacy runs before upgrading the worker", "RunFailed")
+		return e.Store.Save(
+			ctx,
+			run.Lease(),
+			run.State,
+			durable.Failed,
+			"",
+			"unsupported execution state; drain legacy runs before upgrading the worker",
+			"RunFailed",
+		)
 	}
 	s.state.Version = 2
 	llm, bindings, err := e.Build(ctx, run.Spec)
@@ -108,9 +119,18 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 				if name != invalidInputTool {
 					return "", fmt.Errorf("unknown tool: %s", name)
 				}
-				out, err := s.wrapTool(func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-					return &compose.ToolOutput{Result: input.Arguments}, nil
-				})(ctx, &compose.ToolInput{Name: name, Arguments: args, CallID: compose.GetToolCallID(ctx)})
+				out, err := s.wrapTool(
+					func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+						return &compose.ToolOutput{Result: input.Arguments}, nil
+					},
+				)(
+					ctx,
+					&compose.ToolInput{
+						Name:      name,
+						Arguments: args,
+						CallID:    compose.GetToolCallID(ctx),
+					},
+				)
 				if err != nil {
 					return "", err
 				}
@@ -130,7 +150,10 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 	} else {
 		var messages []*schema.Message
 		for _, msg := range run.Spec.History {
-			messages = append(messages, &schema.Message{Role: schema.RoleType(msg.Role), Content: msg.Content})
+			messages = append(
+				messages,
+				&schema.Message{Role: schema.RoleType(msg.Role), Content: msg.Content},
+			)
 		}
 		messages = append(messages, schema.UserMessage(run.Spec.Query))
 		iter = runner.Run(ctx, messages, adk.WithCheckPointID(run.ID))
@@ -149,7 +172,8 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 			}
 			if event.Output != nil && event.Output.MessageOutput != nil {
 				msg := event.Output.MessageOutput.Message
-				if msg != nil && ((msg.Role == schema.Assistant && len(msg.ToolCalls) == 0) || (msg.Role == schema.Tool && (returnDirectly[msg.ToolName] || bindings[msg.ToolName].EndRun) && !toolHasError(msg.Content))) {
+				if msg != nil &&
+					((msg.Role == schema.Assistant && len(msg.ToolCalls) == 0) || (msg.Role == schema.Tool && (returnDirectly[msg.ToolName] || bindings[msg.ToolName].EndRun) && !toolHasError(msg.Content))) {
 					final = msg
 				}
 			}

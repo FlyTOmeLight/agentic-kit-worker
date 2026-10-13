@@ -1,3 +1,10 @@
+AppName = "agentic-kit-worker"
+AppCode = 101
+RunMode = "release"
+
+[HTTPServer]
+Listen = "127.0.0.1:8081"
+
 [database]
 url = "postgres://agentic:agentic_local@127.0.0.1:55432/agentic?sslmode=disable"
 

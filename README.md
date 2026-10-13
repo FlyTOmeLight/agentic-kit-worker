@@ -2,11 +2,11 @@
 
 独立部署的 Agent 执行进程。从 PostgreSQL 领取任务，用 Eino ADK `ChatModelAgent + Runner` 执行单 Agent ReAct。Eino 管理模型／工具循环、消息上下文和 checkpoint；平台保存 checkpoint、执行权与工具结果，进程重启后由其他实例接管。
 
-与 `agentic-kit-api v0.4.0` 配套。该版本包含 `returnDirectly`、AIO 文件系统绑定和执行事件契约，Worker 在 `go.mod` 中固定引用。两个仓库可独立克隆和构建。运行方式、模块认证与可选 go work 联合开发见 [API 启动说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/README.md)。
+与 `agentic-kit-api v0.5.1` 配套。该版本包含 `returnDirectly`、AIO 文件系统绑定和执行事件契约，Worker 在 `go.mod` 中固定引用。两个仓库可独立克隆和构建。运行方式、模块认证与可选 go work 联合开发见 [API 启动说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/README.md)。
 
 ## 项目结构
 
-入口位于 `cmd/worker`，执行器位于 `internal/engine`，模型与工具适配位于 `internal/adapters`。数据库访问统一由 API 的 `pkg/durable` 使用 GORM 管理，worker 复用其中的事务和状态操作；[目录与依赖说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/layout.md)。
+入口位于 `cmd/worker`，server-go 生命周期与资源装配位于 `internal/service`，执行器位于 `internal/engine`，模型与工具适配位于 `internal/adapters`。数据库访问统一由 API 的 `pkg/durable` 使用 GORM 管理，worker 复用其中的事务和状态操作；[目录与依赖说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/layout.md)。
 
 ## Agent 架构与执行规则
 
@@ -19,7 +19,7 @@
 5. 只读工具允许重试；幂等工具使用固定操作编号；结果不明确的 Unsafe 工具进入 NeedsReview。澄清工具进入 WaitingClarification。两者都保存 Eino checkpoint，人工结果提交后重新排队并恢复。
 6. 同轮工具按模型返回顺序执行。前一个工具等待确认或失败时，后面的工具不产生副作用。
 
-`engine.Build` 继续接收 Eino `ToolCallingChatModel` 与 `InvokableTool`；HTTP/AppForge 工具协议与 Coding 业务接口保持现有契约。当前使用完整 Generate，SSE 展示步骤进度与完整结果，不逐 token 推送。
+`engine.Build` 继续接收 Eino `ToolCallingChatModel` 与 `InvokableTool`；远端工具使用通用 HTTP POST：URL 为完整调用地址，直接发送模型生成的 JSON 参数并返回响应正文。工具类型仅接受 `HTTP` 或空值，其他类型在装配时拒绝。当前使用完整 Generate，SSE 展示步骤进度与完整结果，不逐 token 推送。
 
 ### 升级边界
 
@@ -27,17 +27,21 @@
 
 ## 配置
 
-复制 `configs/config.example.toml` 为 `configs/config.local.toml`，执行 `go run ./cmd/worker -config configs/config.local.toml`。也可通过 CONFIG_FILE 指定文件；未指定文件时读取环境变量和默认值。独立 Viper 实例在启动时解码和校验，修改配置后需重启。
+复制 `configs/config.example.toml` 为 `configs/config.local.toml`，执行 `go run ./cmd/worker -config configs/config.local.toml`。也可通过 CONFIG_FILE 指定文件；未指定文件时读取环境变量和默认值。配置使用 server-go v0.3.1 的 `conf.Manager` 独立快照；Viper 保留严格字段校验和环境变量覆盖，应用和 HTTPHost 使用同一份有效配置。也支持 `SERVER_CONFIG_PATH` 与框架的 `${env: NAME[:default]}`、`${file: /path}`、`${secret: ...}` 占位符。未指定任何文件时继续使用环境变量和默认值，修改配置后需重启。
 
 | TOML 字段 | 环境变量 | 默认值 |
 | --- | --- | --- |
 | database.url | DATABASE_URL | 必填 |
+| HTTPServer.Listen | LISTEN_ADDR | 127.0.0.1:8081 |
+| RunMode | GIN_MODE | release |
 | worker.concurrency | WORKER_CONCURRENCY | 4 |
 | worker.lease | WORKER_LEASE | 30s，至少 300ms |
 | worker.poll | WORKER_POLL | 1s，必须大于 0 |
 
-环境变量 > TOML > 默认值；空环境变量也覆盖文件。未知字段、非法时长、非正并发数和读取错误均在连接数据库前报告。模型和工具密钥仍由环境变量提供。Viper v1.21.0 用于配置解析和覆盖，MIT 许可，无需 CGO；固定依赖见 go.mod/go.sum，本次未运行漏洞数据库扫描。
+环境变量 > TOML > 默认值；空环境变量也覆盖文件。未知字段、非法时长、非正并发数和读取错误均在连接数据库前报告。模型和工具密钥仍由环境变量提供。server-go v0.3.1 提供配置快照、Bootstrap、HTTPHost 和日志，使用其已发布的公开模块；Viper v1.21.0 用于字段校验和环境覆盖，均为 MIT 许可，Worker 构建不需要 CGO。固定依赖见 go.mod/go.sum。
 
+
+Bootstrap 在启动时连接数据库，HTTPHost 的 `Start` 启动执行协程。SIGTERM 退出时先停止 HTTP 接入，再取消并等待 Worker，最后关闭数据库。执行器继续使用 `pkg/durable` 的事务与连接，不额外创建框架数据库池。框架提供 `/healthz`（服务已启动）和 `/ping`（进程存活），它们不检查数据库的持续可用性。本地默认仅监听回环地址；Docker 与 Helm 监听 `0.0.0.0:8081`，Helm 使用这两个端点探测。
 
 - `DATABASE_URL`：与 API 相同的 PostgreSQL。
 - `WORKER_CONCURRENCY`：默认 4，每个实例同时执行的任务数。
@@ -55,7 +59,9 @@ make integration
 
 Eino 接入回归覆盖工具调用前已有原生 checkpoint、结果不明时暂停并接受人工确认、同轮多工具顺序、重复 provider ID、跨 checkpoint 的轮次上限、提示词原文与历史，以及旧状态拒绝执行。
 
-`TestProcessKillResumesWithoutRepeatingTool` 会通过真实 HTTP API 提交任务，启动独立子进程 worker，在工具结果保存后强制杀掉该进程，再启动替代执行者。它检查 runID 不变、epoch 增加、工具调用仅一次、任务最终完成，并验证无 Redis 情况下的 SSE 回放。模型和工具服务是受控 HTTP 测试服务，不调用付费模型。
+`TestProcessKillResumesWithoutRepeatingTool` 会通过真实 HTTP API 提交任务，构建并启动真实 `cmd/worker` 二进制，在工具结果保存后强制杀掉该进程，再启动替代执行者。它检查 runID 不变、epoch 增加、工具调用仅一次、任务最终完成，并验证无 Redis 情况下的 SSE 回放。模型和工具服务是受控 HTTP 测试服务，不调用付费模型。
+
+`TestWorkerHealthAndShutdown` 验证真实 Worker 启动后 `/healthz` 返回 200，并在 SIGTERM 后成功退出。独立交付验证使用 `GOWORK=off`，避免测试依赖相邻 API 源码。
 
 [完整迁移范围](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/migration.md) · [故障语义](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/design.md)
 
@@ -68,8 +74,8 @@ HTTP 工具请求由 Worker 注入 `X-Agentic-Run-ID`、`X-Agentic-Epoch`、冻�
 Helm Chart 位于 `charts/agentic-kit-worker`，用 `existingSecret` 指定运行时数据库与工具凭据。构建过程从固定的 API 模块版本下载依赖，不需要相邻 API checkout。GitHub CLI 登录后，使用 BuildKit 临时挂载私有模块认证。凭据不写入镜像层：
 
 ```sh
-FORGE_GITHUB_NETRC="machine github.com login x-access-token password $(gh auth token)" \
-  docker build --secret id=github_netrc,env=FORGE_GITHUB_NETRC -t agentic-kit-worker:dev .
+WORKER_GITHUB_NETRC="machine github.com login x-access-token password $(gh auth token)" \
+  docker build --secret id=github_netrc,env=WORKER_GITHUB_NETRC -t agentic-kit-worker:dev .
 ```
 
 ## AIO 文件与命令工具

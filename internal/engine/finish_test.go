@@ -7,18 +7,39 @@ import (
 	"time"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
-	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+
+	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
 func TestFinishBatchRejectsSideEffectsThenExits(t *testing.T) {
 	s, _ := testDB(t)
 	ctx := context.Background()
-	a, err := s.CreateAgent(ctx, "owner", "finish-test", durable.AgentConfig{Model: durable.ModelSpec{Name: "test", BaseURL: "http://localhost/v1"}, MaxTurns: 5, Tools: []durable.ToolSpec{
-		{Name: "finish", EndRun: true, Policy: durable.Idempotent, URL: "http://localhost/finish", Parameters: json.RawMessage(`{"type":"object"}`)},
-		{Name: "write", Policy: durable.Unsafe, URL: "http://localhost/write", Parameters: json.RawMessage(`{"type":"object"}`)},
-	}})
+	a, err := s.CreateAgent(
+		ctx,
+		"owner",
+		"finish-test",
+		durable.AgentConfig{
+			Model:    durable.ModelSpec{Name: "test", BaseURL: "http://localhost/v1"},
+			MaxTurns: 5,
+			Tools: []durable.ToolSpec{
+				{
+					Name:       "finish",
+					EndRun:     true,
+					Policy:     durable.Idempotent,
+					URL:        "http://localhost/finish",
+					Parameters: json.RawMessage(`{"type":"object"}`),
+				},
+				{
+					Name:       "write",
+					Policy:     durable.Unsafe,
+					URL:        "http://localhost/write",
+					Parameters: json.RawMessage(`{"type":"object"}`),
+				},
+			},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,23 +55,50 @@ func TestFinishBatchRejectsSideEffectsThenExits(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls, finishes, writes := 0, 0, 0
-	e := engine.Engine{Store: s, Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
-		llm := &fakeModel{generate: func(_ context.Context, in []*schema.Message) (*schema.Message, error) {
-			calls++
-			msg := toolReply("finish")
-			if calls == 1 {
-				msg.ToolCalls = append(msg.ToolCalls, schema.ToolCall{Type: "function", Function: schema.FunctionCall{Name: "write", Arguments: `{}`}})
+	e := engine.Engine{
+		Store: s,
+		Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+			llm := &fakeModel{
+				generate: func(_ context.Context, in []*schema.Message) (*schema.Message, error) {
+					calls++
+					msg := toolReply("finish")
+					if calls == 1 {
+						msg.ToolCalls = append(
+							msg.ToolCalls,
+							schema.ToolCall{
+								Type: "function",
+								Function: schema.FunctionCall{
+									Name:      "write",
+									Arguments: `{}`,
+								},
+							},
+						)
+					}
+					if calls > 2 {
+						t.Fatal("model invoked after successful finish")
+					}
+					return msg, nil
+				},
 			}
-			if calls > 2 {
-				t.Fatal("model invoked after successful finish")
-			}
-			return msg, nil
-		}}
-		return llm, map[string]engine.Binding{
-			"finish": {Policy: durable.Idempotent, EndRun: true, Tool: &fakeTool{name: "finish", invoke: func(context.Context, string) (string, error) { finishes++; return `{"accepted":true}`, nil }}},
-			"write":  {Policy: durable.Unsafe, Tool: &fakeTool{name: "write", invoke: func(context.Context, string) (string, error) { writes++; return "written", nil }}},
-		}, nil
-	}}
+			return llm, map[string]engine.Binding{
+				"finish": {
+					Policy: durable.Idempotent,
+					EndRun: true,
+					Tool: &fakeTool{
+						name:   "finish",
+						invoke: func(context.Context, string) (string, error) { finishes++; return `{"accepted":true}`, nil },
+					},
+				},
+				"write": {
+					Policy: durable.Unsafe,
+					Tool: &fakeTool{
+						name:   "write",
+						invoke: func(context.Context, string) (string, error) { writes++; return "written", nil },
+					},
+				},
+			}, nil
+		},
+	}
 	claimed, err := s.Claim(ctx, "worker", time.Minute)
 	if err != nil {
 		t.Fatal(err)

@@ -12,5 +12,6 @@ FROM scratch
 COPY --from=build /worker /worker
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 USER 65532:65532
-ENV GIN_MODE=release
+ENV GIN_MODE=release LISTEN_ADDR=0.0.0.0:8081
+EXPOSE 8081
 ENTRYPOINT ["/worker"]

@@ -44,7 +44,12 @@ func CompileArguments(info *schema.ToolInfo) (func(string) error, error) {
 }
 
 func toolInputFeedback(err error) string {
-	raw, _ := json.Marshal(map[string]any{"error": map[string]string{"code": "INVALID_TOOL_INPUT", "message": fmt.Sprint(err)}, "changed": false})
+	raw, _ := json.Marshal(
+		map[string]any{
+			"error":   map[string]string{"code": "INVALID_TOOL_INPUT", "message": fmt.Sprint(err)},
+			"changed": false,
+		},
+	)
 	return string(raw)
 }
 
@@ -52,7 +57,8 @@ func toolHasError(result string) bool {
 	var response struct {
 		Error json.RawMessage `json:"error"`
 	}
-	return json.Unmarshal([]byte(result), &response) == nil && len(response.Error) > 0 && string(response.Error) != "null"
+	return json.Unmarshal([]byte(result), &response) == nil && len(response.Error) > 0 &&
+		string(response.Error) != "null"
 }
 
 const invalidInputTool = "__invalid_tool_input"

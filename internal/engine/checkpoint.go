@@ -3,7 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	"github.com/cloudwego/eino/adk"
@@ -45,14 +45,14 @@ func (s *execution) fail(ctx context.Context, err error) error {
 
 func (s *execution) Get(_ context.Context, id string) ([]byte, bool, error) {
 	if id != s.run.ID {
-		return nil, false, fmt.Errorf("checkpoint run mismatch")
+		return nil, false, errors.New("checkpoint run mismatch")
 	}
 	return s.state.Checkpoint, len(s.state.Checkpoint) > 0, nil
 }
 
 func (s *execution) Set(ctx context.Context, id string, checkpoint []byte) error {
 	if id != s.run.ID {
-		return fmt.Errorf("checkpoint run mismatch")
+		return errors.New("checkpoint run mismatch")
 	}
 	s.state.Checkpoint = checkpoint
 	if s.decision != nil {
@@ -63,7 +63,7 @@ func (s *execution) Set(ctx context.Context, id string, checkpoint []byte) error
 		return nil
 	}
 	if s.pauseStatus == "" {
-		return fmt.Errorf("unexpected Eino checkpoint without a decision or pause")
+		return errors.New("unexpected Eino checkpoint without a decision or pause")
 	}
 	kind := "RunNeedsReview"
 	if s.pauseStatus == durable.WaitingClarification {

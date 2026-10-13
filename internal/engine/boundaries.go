@@ -14,7 +14,11 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func (s *execution) WrapModel(_ context.Context, m model.BaseChatModel, _ *adk.ModelContext) (model.BaseChatModel, error) {
+func (s *execution) WrapModel(
+	_ context.Context,
+	m model.BaseChatModel,
+	_ *adk.ModelContext,
+) (model.BaseChatModel, error) {
 	return &boundaryModel{BaseChatModel: m, execution: s}, nil
 }
 
@@ -23,7 +27,11 @@ type boundaryModel struct {
 	execution *execution
 }
 
-func (m *boundaryModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+func (m *boundaryModel) Generate(
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...model.Option,
+) (*schema.Message, error) {
 	s := m.execution
 	if err := s.store.Save(ctx, s.run.Lease(), s.encode(), durable.Running, "", "", "ModelStarted"); err != nil {
 		return nil, err
@@ -36,7 +44,8 @@ func (m *boundaryModel) Generate(ctx context.Context, input []*schema.Message, o
 	if msg == nil {
 		return nil, errors.New("model returned no message")
 	}
-	if msg.ResponseMeta != nil && (msg.ResponseMeta.FinishReason == "length" || msg.ResponseMeta.FinishReason == "content_filter") {
+	if msg.ResponseMeta != nil &&
+		(msg.ResponseMeta.FinishReason == "length" || msg.ResponseMeta.FinishReason == "content_filter") {
 		return nil, fmt.Errorf("incomplete model response: %s", msg.ResponseMeta.FinishReason)
 	}
 	s.state.Turn++
@@ -47,7 +56,9 @@ func (m *boundaryModel) Generate(ctx context.Context, input []*schema.Message, o
 		if len(msg.ToolCalls) > 1 {
 			for _, call := range msg.ToolCalls {
 				if s.bindings[call.Function.Name].EndRun {
-					batchError = errors.New("finish must be the only tool in a batch; no operation in this batch was executed")
+					batchError = errors.New(
+						"finish must be the only tool in a batch; no operation in this batch was executed",
+					)
 				}
 			}
 		}
@@ -70,7 +81,14 @@ func (m *boundaryModel) Generate(ctx context.Context, input []*schema.Message, o
 				call.Function.Name = invalidInputTool
 				call.Function.Arguments = toolInputFeedback(inputError)
 			}
-			decision.ToolCalls = append(decision.ToolCalls, durable.ToolCall{ID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments})
+			decision.ToolCalls = append(
+				decision.ToolCalls,
+				durable.ToolCall{
+					ID:        call.ID,
+					Name:      call.Function.Name,
+					Arguments: call.Function.Arguments,
+				},
+			)
 		}
 		s.decision = decision
 	}
@@ -89,7 +107,13 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 			return nil, s.toolError
 		}
 		binding := s.bindings[input.Name]
-		result, cached, err := s.store.BeginStep(ctx, s.run.Lease(), input.CallID, input.Name+"\x00"+input.Arguments, binding.Policy)
+		result, cached, err := s.store.BeginStep(
+			ctx,
+			s.run.Lease(),
+			input.CallID,
+			input.Name+"\x00"+input.Arguments,
+			binding.Policy,
+		)
 		if errors.Is(err, durable.ErrUncertain) {
 			return s.pause(ctx, input.CallID, durable.NeedsReview, "tool outcome unknown: "+input.Name)
 		}
@@ -112,7 +136,13 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 		if binding.Validate != nil {
 			if validationErr := binding.Validate(input.Arguments); validationErr != nil {
 				feedback := toolInputFeedback(validationErr)
-				if err = s.store.FinishStep(ctx, s.run.Lease(), input.CallID, feedback, s.encode()); err != nil {
+				if err = s.store.FinishStep(
+					ctx,
+					s.run.Lease(),
+					input.CallID,
+					feedback,
+					s.encode(),
+				); err != nil {
 					return nil, err
 				}
 				return &compose.ToolOutput{Result: feedback}, nil
@@ -128,7 +158,13 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 			var correctable interface{ Correctable() bool }
 			if errors.As(err, &correctable) && correctable.Correctable() {
 				feedback := toolInputFeedback(err)
-				if saveErr := s.store.FinishStep(ctx, s.run.Lease(), input.CallID, feedback, s.encode()); saveErr != nil {
+				if saveErr := s.store.FinishStep(
+					ctx,
+					s.run.Lease(),
+					input.CallID,
+					feedback,
+					s.encode(),
+				); saveErr != nil {
 					return nil, saveErr
 				}
 				return &compose.ToolOutput{Result: feedback}, nil
@@ -155,7 +191,12 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 	}
 }
 
-func (s *execution) pause(ctx context.Context, step string, status durable.Status, detail string) (*compose.ToolOutput, error) {
+func (s *execution) pause(
+	ctx context.Context,
+	step string,
+	status durable.Status,
+	detail string,
+) (*compose.ToolOutput, error) {
 	s.state.WaitingStep = step
 	s.pauseStatus, s.detail = status, detail
 	return nil, tool.Interrupt(ctx, "save execution boundary")
