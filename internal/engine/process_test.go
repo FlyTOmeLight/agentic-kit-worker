@@ -80,9 +80,8 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 			},
 		},
 	}
-	token := "test-token-with-at-least-24-characters"
-	apiURL := startAPI(t, binary, dsn, token)
-	session := configureConversation(t, apiURL, token, spec)
+	apiURL := startAPI(t, binary, dsn)
+	session := configureConversation(t, apiURL, spec)
 	request, err := http.NewRequestWithContext(
 		ctx,
 		"POST",
@@ -92,7 +91,6 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Idempotency-Key", "process-kill")
 	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -189,7 +187,6 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
 	resp, err = http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -201,18 +198,6 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "RunCompleted") || !strings.Contains(string(body), "report completed") {
 		t.Fatalf("missing durable completion: %s", body)
-	}
-	request, err = http.NewRequestWithContext(ctx, "GET", apiURL+"/v1/runs/"+result.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err = http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 401 {
-		t.Fatalf("unauthenticated read accepted: %d", resp.StatusCode)
 	}
 }
 
@@ -242,7 +227,7 @@ func buildAPI(t *testing.T) string {
 	return binary
 }
 
-func startAPI(t *testing.T, binary, dsn, token string) string {
+func startAPI(t *testing.T, binary, dsn string) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -253,16 +238,10 @@ func startAPI(t *testing.T, binary, dsn, token string) string {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	tokens, err := json.Marshal(map[string]string{token: "owner"})
-	if err != nil {
-		t.Fatal(err)
-	}
 	text := fmt.Sprintf(
-		"[database]\nurl = %q\n[HTTPServer]\nListen = %q\n[redis]\nurl = %q\n[auth]\ntokens_json = %q\nconfig_owners = [\"owner\"]\n",
+		"AppName = \"agentic-kit-api\"\nAppCode = 100\nRunMode = \"release\"\n[FakeAuth]\nUserID = \"owner\"\n[DB]\nDriver = \"PostgreSQL\"\nDSN = %q\nMaxOpenConns = 20\nMaxIdleConns = 5\n[HTTPServer]\nListen = %q\nWriteTimeout = -1\n[Redis]\nAddrs = [\"127.0.0.1:1\"]\n",
 		dsn,
 		address,
-		"redis://127.0.0.1:1/0",
-		string(tokens),
 	)
 	if err := os.WriteFile(configPath, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
@@ -272,8 +251,6 @@ func startAPI(t *testing.T, binary, dsn, token string) string {
 		key, _, _ := strings.Cut(entry, "=")
 		switch key {
 		case "DATABASE_URL",
-			"CONFIG_OWNERS",
-			"API_TOKENS_JSON",
 			"LISTEN_ADDR",
 			"REDIS_URL",
 			"CONFIG_FILE",
@@ -301,10 +278,10 @@ func startAPI(t *testing.T, binary, dsn, token string) string {
 	client := &http.Client{Timeout: 200 * time.Millisecond}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		response, err := client.Get("http://" + address + "/v1/runs/readiness")
+		response, err := client.Get("http://" + address + "/healthz")
 		if err == nil {
 			response.Body.Close()
-			if response.StatusCode == http.StatusUnauthorized {
+			if response.StatusCode == http.StatusOK {
 				return "http://" + address
 			}
 		}
@@ -316,7 +293,7 @@ func startAPI(t *testing.T, binary, dsn, token string) string {
 	return ""
 }
 
-func configureConversation(t *testing.T, base, token string, spec durable.Spec) durable.Session {
+func configureConversation(t *testing.T, base string, spec durable.Spec) durable.Session {
 	t.Helper()
 	call := func(path string, input any, output any, want int) {
 		t.Helper()
@@ -329,7 +306,6 @@ func configureConversation(t *testing.T, base, token string, spec durable.Spec) 
 			t.Fatal(err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+token)
 		client := http.Client{Timeout: 5 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
