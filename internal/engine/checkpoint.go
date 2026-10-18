@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	"github.com/cloudwego/eino/adk"
+
+	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 )
 
 // State is a storage envelope. Agent messages and the ReAct loop belong to the
@@ -16,22 +17,20 @@ type State struct {
 	Version            int     `json:"version"`
 	Checkpoint         []byte  `json:"checkpoint,omitempty"`
 	Turn               int     `json:"turn"`
-	WaitingStep        string  `json:"waitingStep,omitempty"`
 	ReturnDirectlyStep string  `json:"returnDirectlyStep,omitempty"`
 	Final              *string `json:"final,omitempty"`
 }
 
 type execution struct {
 	adk.BaseChatModelAgentMiddleware
-	store       *durable.Store
-	run         *durable.Run
-	state       State
-	bindings    map[string]Binding
-	decision    *durable.Message
-	pauseStatus durable.Status
-	detail      string
-	retry       bool
-	toolError   error
+	store     *durable.Store
+	run       *durable.Run
+	state     State
+	bindings  map[string]Binding
+	decision  *durable.Message
+	pending   *durable.Boundary
+	retry     bool
+	toolError error
 }
 
 func (s *execution) encode() json.RawMessage {
@@ -43,7 +42,11 @@ func (s *execution) encode() json.RawMessage {
 }
 
 func (s *execution) fail(ctx context.Context, err error) error {
-	return s.store.Save(ctx, s.run.Lease(), s.encode(), durable.Failed, "", err.Error(), "RunFailed")
+	return s.store.CommitBoundary(ctx, s.run.Lease(), durable.Boundary{
+		Kind:   durable.BoundaryFail,
+		State:  s.encode(),
+		Detail: err.Error(),
+	})
 }
 
 func (s *execution) Get(_ context.Context, id string) ([]byte, bool, error) {
@@ -59,21 +62,19 @@ func (s *execution) Set(ctx context.Context, id string, checkpoint []byte) error
 	}
 	s.state.Checkpoint = checkpoint
 	if s.decision != nil {
-		if err := s.store.SaveDecision(ctx, s.run.Lease(), s.encode(), *s.decision); err != nil {
+		if err := s.store.RecordDecision(ctx, s.run.Lease(), s.encode(), *s.decision); err != nil {
 			return err
 		}
 		s.decision = nil
 		return nil
 	}
-	if s.pauseStatus == "" {
+	if s.pending == nil {
 		return errors.New("unexpected Eino checkpoint without a decision or pause")
 	}
 	// A later clarification or review owns the next model turn; clear any
 	// provisional direct-tool result so it cannot bypass the human answer.
 	s.state.Final = nil
-	kind := "RunNeedsReview"
-	if s.pauseStatus == durable.WaitingClarification {
-		kind = "ClarificationRequested"
-	}
-	return s.store.Save(ctx, s.run.Lease(), s.encode(), s.pauseStatus, "", s.detail, kind)
+	pause := *s.pending
+	pause.State = s.encode()
+	return s.store.CommitBoundary(ctx, s.run.Lease(), pause)
 }

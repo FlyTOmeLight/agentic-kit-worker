@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
+	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
@@ -94,7 +94,14 @@ func TestEinoCheckpointPrecedesToolAndUncertainOutcomeNeedsReview(t *testing.T) 
 	if err != nil || paused.Status != durable.NeedsReview || toolCalls != 1 || modelCalls != 1 {
 		t.Fatalf("paused=%+v err=%v tools=%d models=%d", paused, err, toolCalls, modelCalls)
 	}
-	if err = s.SupplyResult(ctx, "owner", r.ID, paused.WaitingStep, "receipt", durable.NeedsReview); err != nil {
+	if err = s.SupplyResult(
+		ctx,
+		"owner",
+		r.ID,
+		paused.WaitingStep,
+		"receipt",
+		durable.InteractionReview,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if err = (&engine.Engine{Store: s, Build: build}).Execute(ctx, getClaim(t, s)); err != nil {
@@ -156,7 +163,7 @@ func TestEinoSerialToolsStopAtReviewAndResumeRemainingCalls(t *testing.T) {
 		r.ID,
 		paused.WaitingStep,
 		"first receipt",
-		durable.NeedsReview,
+		durable.InteractionReview,
 	); err != nil {
 		t.Fatal(err)
 	}

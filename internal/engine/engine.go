@@ -9,12 +9,13 @@ import (
 	"sort"
 	"time"
 
-	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+
+	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 )
 
 type Binding struct {
@@ -60,15 +61,11 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 		return err
 	}
 	if s.state.Version != 0 && s.state.Version != 3 {
-		return e.Store.Save(
-			ctx,
-			run.Lease(),
-			run.State,
-			durable.Failed,
-			"",
-			"unsupported execution state; drain legacy runs before upgrading the worker",
-			"RunFailed",
-		)
+		return e.Store.CommitBoundary(ctx, run.Lease(), durable.Boundary{
+			Kind:   durable.BoundaryFail,
+			State:  run.State,
+			Detail: "unsupported execution state; drain legacy runs before upgrading the worker",
+		})
 	}
 	s.state.Version = 3
 	llm, bindings, err := e.Build(ctx, run.Spec)
@@ -193,7 +190,7 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 		if err != nil {
 			break
 		}
-		if s.pauseStatus != "" {
+		if s.pending != nil {
 			// A later clarification or review owns the next model turn; clear any
 			// provisional direct-tool result so it cannot bypass the human answer.
 			s.state.Final = nil
@@ -209,7 +206,11 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 		if final == nil {
 			return s.fail(ctx, errors.New("Eino runner ended without a final response"))
 		}
-		return e.Store.Save(ctx, run.Lease(), s.encode(), durable.Completed, final.Content, "", "RunCompleted")
+		return e.Store.CommitBoundary(ctx, run.Lease(), durable.Boundary{
+			Kind:   durable.BoundaryComplete,
+			State:  s.encode(),
+			Output: final.Content,
+		})
 	}
 	if errors.Is(err, durable.ErrLeaseLost) || ctx.Err() != nil {
 		return err

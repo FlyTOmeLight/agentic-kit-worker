@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
@@ -46,7 +46,7 @@ func testDB(t *testing.T) (*durable.Store, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = store.Migrate(ctx); err != nil {
+	if err = store.InitSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -182,7 +182,7 @@ func TestClarificationSurvivesNewEngine(t *testing.T) {
 		r.ID,
 		paused.WaitingStep,
 		"version 2",
-		durable.WaitingClarification,
+		durable.InteractionClarification,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -279,11 +279,7 @@ func TestUnsafeErrorPausesInsteadOfRetrying(t *testing.T) {
 	if _, err = s.Claim(ctx, "b", time.Second); !errors.Is(err, durable.ErrNoWork) {
 		t.Fatal("unsafe task auto-retried", err)
 	}
-	var state engine.State
-	if err = json.Unmarshal(got.State, &state); err != nil {
-		t.Fatal(err)
-	}
-	if state.WaitingStep == "" {
-		t.Fatal("no step available for reconciliation")
+	if got.WaitingStep == "" || got.WaitingKind != durable.InteractionReview {
+		t.Fatalf("no step available for reconciliation: %+v", got)
 	}
 }
