@@ -8,6 +8,8 @@ spec:
   template:
     metadata:
       labels: {app: {{ .Release.Name }}-worker}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       automountServiceAccountToken: false
       securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
@@ -16,6 +18,16 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: [/worker]
+          args: [-config, /conf/server/config.toml, -log-config, /conf/server/logger.toml]
+          volumeMounts:
+            - name: config
+              mountPath: /conf/server/config.toml
+              subPath: config.toml
+              readOnly: true
+            - name: logger
+              mountPath: /conf/server/logger.toml
+              subPath: logger.toml
+              readOnly: true
           ports: [{name: health, containerPort: 8081}]
           env:
             - name: LISTEN_ADDR
@@ -29,3 +41,10 @@ spec:
           resources:
             requests: {cpu: 50m, memory: 96Mi}
             limits: {memory: 512Mi}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-worker-config
+        - name: logger
+          configMap:
+            name: {{ .Release.Name }}-worker-logger

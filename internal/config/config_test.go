@@ -1,29 +1,14 @@
 package config
 
 import (
-	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
-)
 
-func clearEnv(t *testing.T, keys ...string) {
-	t.Helper()
-	for _, key := range keys {
-		value, exists := os.LookupEnv(key)
-		if err := os.Unsetenv(key); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			if exists {
-				_ = os.Setenv(key, value)
-			} else {
-				_ = os.Unsetenv(key)
-			}
-		})
-	}
-}
+	"github.com/FlyTOmeLight/server-go/conf"
+)
 
 func writeConfig(t *testing.T, text string) string {
 	t.Helper()
@@ -34,107 +19,116 @@ func writeConfig(t *testing.T, text string) string {
 	return path
 }
 
-func TestWorkerFileAndEnv(t *testing.T) {
-	clearEnv(t, "DATABASE_URL", "WORKER_CONCURRENCY", "WORKER_LEASE", "WORKER_POLL")
-	path := writeConfig(t, `[database]
-url = "postgres://localhost/db"
-[worker]
-concurrency = 2
-lease = "900ms"
-poll = "20ms"
-`)
-	cfg, err := Load(path)
+func decodeConfig(t *testing.T, path string) (Config, error) {
+	t.Helper()
+	snapshot, err := conf.Load(path)
 	if err != nil {
-		t.Fatal(err)
+		return Config{}, err
 	}
-	if cfg.Worker.Concurrency != 2 || cfg.Worker.Lease != 900*time.Millisecond ||
-		cfg.Worker.Poll != 20*time.Millisecond {
-		t.Fatal("TOML settings not loaded")
+	var cfg Config
+	if err := snapshot.Unmarshal(&cfg); err != nil {
+		return cfg, err
 	}
-	t.Setenv("WORKER_CONCURRENCY", "6")
-	t.Setenv("WORKER_LEASE", "1m")
-	cfg, err = Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Worker.Concurrency != 6 || cfg.Worker.Lease != time.Minute {
-		t.Fatal("env override failed")
-	}
+	return cfg, cfg.Validate()
 }
 
-func TestWorkerDefaultsAndFailures(t *testing.T) {
-	clearEnv(t, "DATABASE_URL", "WORKER_CONCURRENCY", "WORKER_LEASE", "WORKER_POLL")
+func TestFrameworkConfig(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost/db")
-	cfg, err := Load("")
+	t.Setenv("GIN_MODE", "release")
+	t.Setenv("LISTEN_ADDR", "127.0.0.1:9101")
+	t.Setenv("WORKER_CONCURRENCY", "6")
+	t.Setenv("WORKER_LEASE", "900ms")
+	t.Setenv("WORKER_POLL", "20ms")
+	path := filepath.Join("..", "..", "conf", "server", "config.toml")
+	cfg, err := decodeConfig(t, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Worker.Concurrency != 4 || cfg.Worker.Lease != 30*time.Second || cfg.Worker.Poll != time.Second {
-		t.Fatal("defaults not loaded")
+	if cfg.DB.DSN != "postgres://localhost/db" || cfg.HTTPServer.Listen != "127.0.0.1:9101" ||
+		cfg.Worker.Concurrency != 6 || cfg.Worker.Lease != 900*time.Millisecond || cfg.Worker.Poll != 20*time.Millisecond {
+		t.Fatalf("configuration not decoded: %+v", cfg)
 	}
-	for _, tc := range []struct{ name, key, value string }{
-		{name: "zero concurrency", key: "WORKER_CONCURRENCY", value: "0"},
-		{name: "invalid integer", key: "WORKER_CONCURRENCY", value: "bad"},
-		{name: "short lease", key: "WORKER_LEASE", value: "1ms"},
-		{name: "invalid duration", key: "WORKER_LEASE", value: "bad"},
-		{name: "zero poll", key: "WORKER_POLL", value: "0s"},
-		{name: "empty database", key: "DATABASE_URL", value: ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(tc.key, tc.value)
-			if _, err := Load(""); err == nil {
-				t.Fatal("expected configuration error")
-			}
-		})
-	}
-	if _, err := Load(writeConfig(t, "[worker]\nconcurrncy=2")); err == nil {
-		t.Fatal("unknown key accepted")
-	}
-	if _, err := Load(filepath.Join(t.TempDir(), "missing.toml")); err == nil {
-		t.Fatal("explicit missing file accepted")
+	if cfg.DB.MaxOpenConns != 20 || cfg.DB.MaxIdleConns != 5 || cfg.DB.AutoMigrate {
+		t.Fatal("framework database configuration not decoded")
 	}
 }
 
 func TestFrameworkSnapshot(t *testing.T) {
-	clearEnv(
-		t,
-		"DATABASE_URL",
-		"WORKER_CONCURRENCY",
-		"WORKER_LEASE",
-		"WORKER_POLL",
-		"LISTEN_ADDR",
-		"GIN_MODE",
-		"SERVER_CONFIG_PATH",
-	)
-	t.Setenv("TEST_WORKER_DSN", "postgres://localhost/db")
-	t.Setenv("LISTEN_ADDR", "127.0.0.1:9101")
-	t.Setenv("SERVER_CONFIG_PATH", writeConfig(t, `[database]
-url = "${env:TEST_WORKER_DSN}"
+	t.Setenv("TEST_WORKER_DSN", "postgres://localhost/first")
+	path := writeConfig(t, `AppName = "worker-test"
+AppCode = 101
+RunMode = "test"
 [HTTPServer]
-Listen = "127.0.0.1:9001"
-`))
-	cfg, manager, err := LoadManager("")
+Listen = "127.0.0.1:0"
+[DB]
+Driver = "PostgreSQL"
+DSN = "${env:TEST_WORKER_DSN}"
+[Worker]
+Concurrency = 4
+Lease = "30s"
+Poll = "1s"
+`)
+	t.Setenv("SERVER_CONFIG_PATH", path)
+	snapshot, err := conf.Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer manager.Close(context.Background())
-	var decoded Config
-	if err := manager.Snapshot().Unmarshal(&decoded); err != nil {
+	t.Setenv("TEST_WORKER_DSN", "postgres://localhost/second")
+	var cfg Config
+	if err := snapshot.Unmarshal(&cfg); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Database != cfg.Database || decoded.Worker != cfg.Worker ||
-		decoded.HTTPServer.Listen != cfg.HTTPServer.Listen ||
-		cfg.HTTPServer.Listen != "127.0.0.1:9101" {
-		t.Fatal("application and host snapshots differ")
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range []struct{ key, value string }{
-		{key: "LISTEN_ADDR", value: "bad"}, {key: "LISTEN_ADDR", value: "127.0.0.1:65536"}, {key: "GIN_MODE", value: "invalid"},
+	if cfg.DB.DSN != "postgres://localhost/first" || cfg.Worker.Concurrency != 4 ||
+		cfg.Worker.Lease != 30*time.Second || cfg.Worker.Poll != time.Second {
+		t.Fatal("startup snapshot changed or duration conversion failed")
+	}
+}
+
+func TestInvalidConfiguration(t *testing.T) {
+	base := `AppName = "worker-test"
+AppCode = 101
+RunMode = "test"
+[HTTPServer]
+Listen = "127.0.0.1:0"
+[DB]
+Driver = "PostgreSQL"
+DSN = "postgres://localhost/db"
+AutoMigrate = false
+[Worker]
+Concurrency = 4
+Lease = "30s"
+Poll = "1s"
+`
+	for _, tc := range []struct {
+		name, old, value, want string
+	}{
+		{name: "wrong driver", old: `Driver = "PostgreSQL"`, value: `Driver = "SQLite"`, want: "DB.Driver"},
+		{name: "auto migration", old: "AutoMigrate = false", value: "AutoMigrate = true", want: "DB.AutoMigrate"},
+		{name: "missing database", old: `DSN = "postgres://localhost/db"`, value: `DSN = ""`, want: "DB.DSN"},
+		{name: "invalid database", old: `DSN = "postgres://localhost/db"`, value: `DSN = "postgres://user:secret@host:bad/db"`, want: "invalid DB.DSN"},
+		{name: "zero concurrency", old: "Concurrency = 4", value: "Concurrency = 0", want: "Worker.Concurrency"},
+		{name: "invalid integer", old: "Concurrency = 4", value: `Concurrency = "bad"`, want: "Concurrency"},
+		{name: "short lease", old: `Lease = "30s"`, value: `Lease = "1ms"`, want: "Worker.Lease"},
+		{name: "invalid duration", old: `Lease = "30s"`, value: `Lease = "bad"`, want: "Lease"},
+		{name: "zero poll", old: `Poll = "1s"`, value: `Poll = "0s"`, want: "Worker.Poll"},
+		{name: "invalid listen", old: `Listen = "127.0.0.1:0"`, value: `Listen = "bad"`, want: "HTTPServer.Listen"},
+		{name: "invalid port", old: `Listen = "127.0.0.1:0"`, value: `Listen = "127.0.0.1:65536"`, want: "HTTPServer.Listen"},
+		{name: "invalid run mode", old: `RunMode = "test"`, value: `RunMode = "invalid"`, want: "RunMode"},
 	} {
-		t.Run(tc.key+tc.value, func(t *testing.T) {
-			t.Setenv(tc.key, tc.value)
-			if _, _, err := LoadManager(""); err == nil {
-				t.Fatal("invalid framework setting accepted")
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := decodeConfig(t, writeConfig(t, strings.Replace(base, tc.old, tc.value, 1)))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %s configuration error, got %v", tc.want, err)
+			}
+			if strings.Contains(err.Error(), "secret") {
+				t.Fatal("configuration error exposed database credentials")
 			}
 		})
+	}
+	if _, err := decodeConfig(t, filepath.Join(t.TempDir(), "missing.toml")); err == nil {
+		t.Fatal("explicit missing file accepted")
 	}
 }

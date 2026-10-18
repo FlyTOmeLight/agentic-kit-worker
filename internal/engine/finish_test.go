@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -109,5 +110,52 @@ func TestFinishBatchRejectsSideEffectsThenExits(t *testing.T) {
 	got, err := s.Get(ctx, "owner", r.ID)
 	if err != nil || got.Status != durable.Completed || calls != 2 || finishes != 1 || writes != 0 {
 		t.Fatalf("status=%s calls=%d finishes=%d writes=%d err=%v", got.Status, calls, finishes, writes, err)
+	}
+}
+
+func TestFinishValidationFeedbackReturnsToModel(t *testing.T) {
+	s, _ := testDB(t)
+	ctx := context.Background()
+	r := submit(t, s, "finish", durable.Idempotent)
+	claimed := getClaim(t, s)
+	claimed.Spec.Tools[0].EndRun = true
+	calls, finishes := 0, 0
+	e := &engine.Engine{
+		Store: s,
+		Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+			return &fakeModel{
+				generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
+					calls++
+					if calls == 1 {
+						return toolReply("finish"), nil
+					}
+					last := msgs[len(msgs)-1]
+					if last.Role != schema.Tool || !json.Valid([]byte(last.Content)) {
+						t.Errorf("missing validation feedback: %+v", last)
+					}
+					return schema.AssistantMessage("corrected", nil), nil
+				},
+			}, map[string]engine.Binding{
+				"finish": {
+					Policy:   durable.Idempotent,
+					EndRun:   true,
+					Validate: func(string) error { return errors.New("invalid finish") },
+					Tool: &fakeTool{
+						name: "finish",
+						invoke: func(context.Context, string) (string, error) {
+							finishes++
+							return `{"accepted":true}`, nil
+						},
+					},
+				},
+			}, nil
+		},
+	}
+	if err := e.Execute(ctx, claimed); err != nil {
+		t.Fatal(err)
+	}
+	done, err := s.Get(ctx, "owner", r.ID)
+	if err != nil || done.Status != durable.Completed || done.Output != "corrected" || calls != 2 || finishes != 0 {
+		t.Fatalf("done=%+v calls=%d finishes=%d err=%v", done, calls, finishes, err)
 	}
 }

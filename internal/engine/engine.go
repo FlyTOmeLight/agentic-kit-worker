@@ -18,10 +18,11 @@ import (
 )
 
 type Binding struct {
-	EndRun   bool
-	Validate func(string) error
-	Tool     tool.InvokableTool
-	Policy   durable.Policy
+	EndRun         bool
+	ReturnDirectly bool
+	Validate       func(string) error
+	Tool           tool.InvokableTool
+	Policy         durable.Policy
 }
 
 // Build resolves only the immutable configuration accepted for this run.
@@ -58,7 +59,7 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 	if err := json.Unmarshal(run.State, &s.state); err != nil {
 		return err
 	}
-	if s.state.Version != 0 && s.state.Version != 2 {
+	if s.state.Version != 0 && s.state.Version != 3 {
 		return e.Store.Save(
 			ctx,
 			run.Lease(),
@@ -69,21 +70,23 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 			"RunFailed",
 		)
 	}
-	s.state.Version = 2
+	s.state.Version = 3
 	llm, bindings, err := e.Build(ctx, run.Spec)
 	if err != nil {
 		return s.fail(ctx, err)
 	}
 	var tools []tool.BaseTool
-	returnDirectly := make(map[string]bool)
+	hasReturnDirectly := false
 	for _, spec := range run.Spec.Tools {
 		binding, ok := bindings[spec.Name]
 		if !ok || binding.Policy != spec.Policy {
 			return s.fail(ctx, fmt.Errorf("tool binding mismatch: %s", spec.Name))
 		}
+		binding.ReturnDirectly = spec.ReturnDirectly
+		bindings[spec.Name] = binding
 		tools = append(tools, binding.Tool)
 		if spec.ReturnDirectly || binding.EndRun {
-			returnDirectly[spec.Name] = true
+			hasReturnDirectly = true
 		}
 	}
 	if len(run.Spec.Toolsets) > 0 {
@@ -104,16 +107,22 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 	}
 	bindings[invalidInputTool] = Binding{Policy: durable.ReadOnly}
 	s.bindings = bindings
+	maxIterations := run.Spec.MaxTurns
+	if hasReturnDirectly {
+		// A successful terminal tool uses one internal synthetic response, without
+		// spending another user-configured model turn.
+		maxIterations++
+	}
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:          "agent",
 		Instruction:   run.Spec.SystemPrompt,
 		Model:         llm,
-		MaxIterations: run.Spec.MaxTurns,
+		MaxIterations: maxIterations,
 		// Published prompts are literal text, not templates.
 		GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
 			return append([]*schema.Message{schema.SystemMessage(instruction)}, input.Messages...), nil
 		},
-		ToolsConfig: adk.ToolsConfig{ReturnDirectly: returnDirectly, ToolsNodeConfig: compose.ToolsNodeConfig{
+		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
 			Tools: tools, ExecuteSequentially: true,
 			UnknownToolsHandler: func(ctx context.Context, name, args string) (string, error) {
 				if name != invalidInputTool {
@@ -172,8 +181,7 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 			}
 			if event.Output != nil && event.Output.MessageOutput != nil {
 				msg := event.Output.MessageOutput.Message
-				if msg != nil &&
-					((msg.Role == schema.Assistant && len(msg.ToolCalls) == 0) || (msg.Role == schema.Tool && (returnDirectly[msg.ToolName] || bindings[msg.ToolName].EndRun) && !toolHasError(msg.Content))) {
+				if msg != nil && msg.Role == schema.Assistant && len(msg.ToolCalls) == 0 {
 					final = msg
 				}
 			}
@@ -186,11 +194,17 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 			break
 		}
 		if s.pauseStatus != "" {
+			// A later clarification or review owns the next model turn; clear any
+			// provisional direct-tool result so it cannot bypass the human answer.
+			s.state.Final = nil
 			return nil
 		} // Set atomically saved pause and checkpoint.
 		if interrupted {
 			iter, err = runner.Resume(ctx, run.ID)
 			continue
+		}
+		if s.state.Final != nil {
+			final = schema.AssistantMessage(*s.state.Final, nil)
 		}
 		if final == nil {
 			return s.fail(ctx, errors.New("Eino runner ended without a final response"))

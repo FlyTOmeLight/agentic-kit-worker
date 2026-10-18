@@ -11,7 +11,8 @@ RUN CGO_ENABLED=0 go build -tags=nomsgpack -trimpath -ldflags="-s -w" -o /worker
 FROM scratch
 COPY --from=build /worker /worker
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY conf /conf
 USER 65532:65532
-ENV GIN_MODE=release LISTEN_ADDR=0.0.0.0:8081
+ENV LISTEN_ADDR=0.0.0.0:8081 LOG_CONFIG_FILE=/conf/server/logger.toml
 EXPOSE 8081
 ENTRYPOINT ["/worker"]

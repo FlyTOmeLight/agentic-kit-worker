@@ -1,0 +1,4 @@
+Level = "Info"
+
+[[Outputs]]
+Type = "Console"

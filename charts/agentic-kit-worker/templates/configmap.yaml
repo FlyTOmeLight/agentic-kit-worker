@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-worker-config
+data:
+  config.toml: |
+{{ .Values.applicationConfig | indent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-worker-logger
+data:
+  logger.toml: |
+{{ .Values.loggerConfig | indent 4 }}
