@@ -123,25 +123,30 @@ func TestFinishValidationFeedbackReturnsToModel(t *testing.T) {
 	e := &engine.Engine{
 		Store: s,
 		Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
-			return &fakeModel{generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
-				calls++
-				if calls == 1 {
-					return toolReply("finish"), nil
-				}
-				last := msgs[len(msgs)-1]
-				if last.Role != schema.Tool || !json.Valid([]byte(last.Content)) {
-					t.Errorf("missing validation feedback: %+v", last)
-				}
-				return schema.AssistantMessage("corrected", nil), nil
-			}}, map[string]engine.Binding{
+			return &fakeModel{
+				generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
+					calls++
+					if calls == 1 {
+						return toolReply("finish"), nil
+					}
+					last := msgs[len(msgs)-1]
+					if last.Role != schema.Tool || !json.Valid([]byte(last.Content)) {
+						t.Errorf("missing validation feedback: %+v", last)
+					}
+					return schema.AssistantMessage("corrected", nil), nil
+				},
+			}, map[string]engine.Binding{
 				"finish": {
 					Policy:   durable.Idempotent,
 					EndRun:   true,
 					Validate: func(string) error { return errors.New("invalid finish") },
-					Tool: &fakeTool{name: "finish", invoke: func(context.Context, string) (string, error) {
-						finishes++
-						return `{"accepted":true}`, nil
-					}},
+					Tool: &fakeTool{
+						name: "finish",
+						invoke: func(context.Context, string) (string, error) {
+							finishes++
+							return `{"accepted":true}`, nil
+						},
+					},
 				},
 			}, nil
 		},

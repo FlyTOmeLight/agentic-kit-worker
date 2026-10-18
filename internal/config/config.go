@@ -30,7 +30,9 @@ func (cfg Config) Validate() error {
 		return errors.New("DB.Driver must be PostgreSQL")
 	}
 	if cfg.DB.AutoMigrate {
-		return errors.New("DB.AutoMigrate must be false; schema initialization is managed outside the worker lifecycle")
+		return errors.New(
+			"DB.AutoMigrate must be false; schema initialization is managed outside the worker lifecycle",
+		)
 	}
 	if strings.TrimSpace(cfg.DB.DSN) == "" {
 		return errors.New("DB.DSN is required")

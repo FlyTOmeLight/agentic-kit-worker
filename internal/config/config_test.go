@@ -105,18 +105,18 @@ Poll = "1s"
 	for _, tc := range []struct {
 		name, old, value, want string
 	}{
-		{"wrong driver", `Driver = "PostgreSQL"`, `Driver = "SQLite"`, "DB.Driver"},
-		{"auto migration", "AutoMigrate = false", "AutoMigrate = true", "DB.AutoMigrate"},
-		{"missing database", `DSN = "postgres://localhost/db"`, `DSN = ""`, "DB.DSN"},
-		{"invalid database", `DSN = "postgres://localhost/db"`, `DSN = "postgres://user:secret@host:bad/db"`, "invalid DB.DSN"},
-		{"zero concurrency", "Concurrency = 4", "Concurrency = 0", "Worker.Concurrency"},
-		{"invalid integer", "Concurrency = 4", `Concurrency = "bad"`, "Concurrency"},
-		{"short lease", `Lease = "30s"`, `Lease = "1ms"`, "Worker.Lease"},
-		{"invalid duration", `Lease = "30s"`, `Lease = "bad"`, "Lease"},
-		{"zero poll", `Poll = "1s"`, `Poll = "0s"`, "Worker.Poll"},
-		{"invalid listen", `Listen = "127.0.0.1:0"`, `Listen = "bad"`, "HTTPServer.Listen"},
-		{"invalid port", `Listen = "127.0.0.1:0"`, `Listen = "127.0.0.1:65536"`, "HTTPServer.Listen"},
-		{"invalid run mode", `RunMode = "test"`, `RunMode = "invalid"`, "RunMode"},
+		{name: "wrong driver", old: `Driver = "PostgreSQL"`, value: `Driver = "SQLite"`, want: "DB.Driver"},
+		{name: "auto migration", old: "AutoMigrate = false", value: "AutoMigrate = true", want: "DB.AutoMigrate"},
+		{name: "missing database", old: `DSN = "postgres://localhost/db"`, value: `DSN = ""`, want: "DB.DSN"},
+		{name: "invalid database", old: `DSN = "postgres://localhost/db"`, value: `DSN = "postgres://user:secret@host:bad/db"`, want: "invalid DB.DSN"},
+		{name: "zero concurrency", old: "Concurrency = 4", value: "Concurrency = 0", want: "Worker.Concurrency"},
+		{name: "invalid integer", old: "Concurrency = 4", value: `Concurrency = "bad"`, want: "Concurrency"},
+		{name: "short lease", old: `Lease = "30s"`, value: `Lease = "1ms"`, want: "Worker.Lease"},
+		{name: "invalid duration", old: `Lease = "30s"`, value: `Lease = "bad"`, want: "Lease"},
+		{name: "zero poll", old: `Poll = "1s"`, value: `Poll = "0s"`, want: "Worker.Poll"},
+		{name: "invalid listen", old: `Listen = "127.0.0.1:0"`, value: `Listen = "bad"`, want: "HTTPServer.Listen"},
+		{name: "invalid port", old: `Listen = "127.0.0.1:0"`, value: `Listen = "127.0.0.1:65536"`, want: "HTTPServer.Listen"},
+		{name: "invalid run mode", old: `RunMode = "test"`, value: `RunMode = "invalid"`, want: "RunMode"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := decodeConfig(t, writeConfig(t, strings.Replace(base, tc.old, tc.value, 1)))

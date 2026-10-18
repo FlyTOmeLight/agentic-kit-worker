@@ -97,7 +97,8 @@ func TestReturnDirectDeliveryDoesNotInvokeAnotherModelOrTool(t *testing.T) {
 
 type correctableTestError string
 
-func (e correctableTestError) Error() string     { return string(e) }
+func (e correctableTestError) Error() string { return string(e) }
+
 func (e correctableTestError) Correctable() bool { return true }
 
 func TestReturnDirectErrorsResumeModelWithinTurnBudget(t *testing.T) {
@@ -125,36 +126,55 @@ func TestReturnDirectErrorsResumeModelWithinTurnBudget(t *testing.T) {
 			e := &engine.Engine{
 				Store: s,
 				Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
-					return &fakeModel{generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
-						modelCalls++
-						if modelCalls == 1 {
-							return toolReply("deliver"), nil
-						}
-						if modelCalls > 2 {
-							t.Fatal("direct tool error exceeded the model turn budget")
-						}
-						last := msgs[len(msgs)-1]
-						if last.Role != schema.Tool {
-							t.Errorf("model did not receive tool feedback: %+v", last)
-						}
-						if tc.correctable {
-							if !strings.Contains(last.Content, "INVALID_TOOL_INPUT") || !strings.Contains(last.Content, "bad input") {
-								t.Errorf("missing correctable feedback: %s", last.Content)
+					return &fakeModel{
+						generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
+							modelCalls++
+							if modelCalls == 1 {
+								return toolReply("deliver"), nil
 							}
-						} else if last.Content != errorResult {
-							t.Errorf("error result changed: %s", last.Content)
-						}
-						return schema.AssistantMessage("corrected", nil), nil
-					}}, map[string]engine.Binding{
+							if modelCalls > 2 {
+								t.Fatal(
+									"direct tool error exceeded the model turn budget",
+								)
+							}
+							last := msgs[len(msgs)-1]
+							if last.Role != schema.Tool {
+								t.Errorf(
+									"model did not receive tool feedback: %+v",
+									last,
+								)
+							}
+							if tc.correctable {
+								if !strings.Contains(
+									last.Content,
+									"INVALID_TOOL_INPUT",
+								) ||
+									!strings.Contains(last.Content, "bad input") {
+									t.Errorf(
+										"missing correctable feedback: %s",
+										last.Content,
+									)
+								}
+							} else if last.Content != errorResult {
+								t.Errorf("error result changed: %s", last.Content)
+							}
+							return schema.AssistantMessage("corrected", nil), nil
+						},
+					}, map[string]engine.Binding{
 						"deliver": {
 							Policy: durable.ReadOnly,
-							Tool: &fakeTool{name: "deliver", invoke: func(context.Context, string) (string, error) {
-								toolCalls++
-								if tc.correctable {
-									return "", correctableTestError("bad input")
-								}
-								return errorResult, nil
-							}},
+							Tool: &fakeTool{
+								name: "deliver",
+								invoke: func(context.Context, string) (string, error) {
+									toolCalls++
+									if tc.correctable {
+										return "", correctableTestError(
+											"bad input",
+										)
+									}
+									return errorResult, nil
+								},
+							},
 						},
 					}, nil
 				},
@@ -165,7 +185,15 @@ func TestReturnDirectErrorsResumeModelWithinTurnBudget(t *testing.T) {
 			done, err := s.Get(ctx, "owner", r.ID)
 			if err != nil || done.Status != tc.wantStatus || done.Output != tc.wantOutput ||
 				modelCalls != tc.wantModels || toolCalls != 1 {
-				t.Fatalf("status=%s output=%q error=%q models=%d tools=%d err=%v", done.Status, done.Output, done.Error, modelCalls, toolCalls, err)
+				t.Fatalf(
+					"status=%s output=%q error=%q models=%d tools=%d err=%v",
+					done.Status,
+					done.Output,
+					done.Error,
+					modelCalls,
+					toolCalls,
+					err,
+				)
 			}
 		})
 	}
@@ -200,14 +228,26 @@ func TestReturnDirectUsesFirstSelectedEmptyResult(t *testing.T) {
 				})
 				return msg, nil
 			}}, map[string]engine.Binding{
-				"first": {Policy: durable.ReadOnly, Tool: &fakeTool{name: "first", invoke: func(context.Context, string) (string, error) {
-					firstCalls++
-					return "", nil
-				}}},
-				"second": {Policy: durable.ReadOnly, Tool: &fakeTool{name: "second", invoke: func(context.Context, string) (string, error) {
-					secondCalls++
-					return "second", nil
-				}}},
+				"first": {
+					Policy: durable.ReadOnly,
+					Tool: &fakeTool{
+						name: "first",
+						invoke: func(context.Context, string) (string, error) {
+							firstCalls++
+							return "", nil
+						},
+					},
+				},
+				"second": {
+					Policy: durable.ReadOnly,
+					Tool: &fakeTool{
+						name: "second",
+						invoke: func(context.Context, string) (string, error) {
+							secondCalls++
+							return "second", nil
+						},
+					},
+				},
 			}, nil
 		},
 	}
@@ -217,7 +257,16 @@ func TestReturnDirectUsesFirstSelectedEmptyResult(t *testing.T) {
 	done, err := s.Get(ctx, "owner", r.ID)
 	if err != nil || done.Status != durable.Completed || done.Output != "" ||
 		modelCalls != 1 || firstCalls != 1 || secondCalls != 1 {
-		t.Fatalf("status=%s output=%q error=%q models=%d first=%d second=%d err=%v", done.Status, done.Output, done.Error, modelCalls, firstCalls, secondCalls, err)
+		t.Fatalf(
+			"status=%s output=%q error=%q models=%d first=%d second=%d err=%v",
+			done.Status,
+			done.Output,
+			done.Error,
+			modelCalls,
+			firstCalls,
+			secondCalls,
+			err,
+		)
 	}
 }
 
@@ -276,14 +325,20 @@ func TestReturnDirectPauseKeepsLaterReviewResult(t *testing.T) {
 			})
 			return msg, nil
 		}}, map[string]engine.Binding{
-			"deliver": {Policy: durable.ReadOnly, Tool: &fakeTool{name: "deliver", invoke: func(context.Context, string) (string, error) {
-				deliverCalls++
-				return "delivered", nil
-			}}},
-			"submit": {Policy: durable.Unsafe, Tool: &fakeTool{name: "submit", invoke: func(context.Context, string) (string, error) {
-				submitCalls++
-				return "", errors.New("receipt unknown")
-			}}},
+			"deliver": {
+				Policy: durable.ReadOnly,
+				Tool: &fakeTool{name: "deliver", invoke: func(context.Context, string) (string, error) {
+					deliverCalls++
+					return "delivered", nil
+				}},
+			},
+			"submit": {
+				Policy: durable.Unsafe,
+				Tool: &fakeTool{name: "submit", invoke: func(context.Context, string) (string, error) {
+					submitCalls++
+					return "", errors.New("receipt unknown")
+				}},
+			},
 		}, nil
 	}
 	e := &engine.Engine{Store: s, Build: build}
@@ -294,7 +349,14 @@ func TestReturnDirectPauseKeepsLaterReviewResult(t *testing.T) {
 	if err != nil || paused.Status != durable.NeedsReview || deliverCalls != 1 || submitCalls != 1 {
 		t.Fatalf("paused=%+v deliver=%d submit=%d err=%v", paused, deliverCalls, submitCalls, err)
 	}
-	if err = s.SupplyResult(ctx, "owner", r.ID, paused.WaitingStep, "confirmed receipt", durable.NeedsReview); err != nil {
+	if err = s.SupplyResult(
+		ctx,
+		"owner",
+		r.ID,
+		paused.WaitingStep,
+		"confirmed receipt",
+		durable.NeedsReview,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if err = e.Execute(ctx, getClaim(t, s)); err != nil {
@@ -303,7 +365,16 @@ func TestReturnDirectPauseKeepsLaterReviewResult(t *testing.T) {
 	done, err := s.Get(ctx, "owner", r.ID)
 	if err != nil || done.Status != durable.Completed || done.Output != "reviewed" ||
 		modelCalls != 2 || deliverCalls != 1 || submitCalls != 1 {
-		t.Fatalf("status=%s output=%q error=%q models=%d deliver=%d submit=%d err=%v", done.Status, done.Output, done.Error, modelCalls, deliverCalls, submitCalls, err)
+		t.Fatalf(
+			"status=%s output=%q error=%q models=%d deliver=%d submit=%d err=%v",
+			done.Status,
+			done.Output,
+			done.Error,
+			modelCalls,
+			deliverCalls,
+			submitCalls,
+			err,
+		)
 	}
 }
 
@@ -321,14 +392,20 @@ func TestReturnDirectCachedResultDoesNotRepeatTool(t *testing.T) {
 			modelCalls++
 			return toolReply("deliver"), nil
 		}}, map[string]engine.Binding{
-			"deliver": {Policy: durable.Unsafe, Tool: &fakeTool{name: "deliver", invoke: func(ctx context.Context, _ string) (string, error) {
-				toolCalls++
-				if toolCalls > 1 {
-					return "", errors.New("tool repeated")
-				}
-				cancel()
-				return "", ctx.Err()
-			}}},
+			"deliver": {
+				Policy: durable.Unsafe,
+				Tool: &fakeTool{
+					name: "deliver",
+					invoke: func(ctx context.Context, _ string) (string, error) {
+						toolCalls++
+						if toolCalls > 1 {
+							return "", errors.New("tool repeated")
+						}
+						cancel()
+						return "", ctx.Err()
+					},
+				},
+			},
 		}, nil
 	}
 	e := &engine.Engine{Store: s, Build: build}
@@ -351,6 +428,14 @@ func TestReturnDirectCachedResultDoesNotRepeatTool(t *testing.T) {
 	done, err := s.Get(ctx, "owner", r.ID)
 	if err != nil || done.Status != durable.Completed || done.Output != "receipt" ||
 		modelCalls != 1 || toolCalls != 1 {
-		t.Fatalf("status=%s output=%q error=%q models=%d tools=%d err=%v", done.Status, done.Output, done.Error, modelCalls, toolCalls, err)
+		t.Fatalf(
+			"status=%s output=%q error=%q models=%d tools=%d err=%v",
+			done.Status,
+			done.Output,
+			done.Error,
+			modelCalls,
+			toolCalls,
+			err,
+		)
 	}
 }
