@@ -64,7 +64,7 @@ func TestEinoCheckpointPrecedesToolAndUncertainOutcomeNeedsReview(t *testing.T) 
 			if err = json.Unmarshal(saved.State, &state); err != nil {
 				return "", err
 			}
-			if state.Version != 2 || len(state.Checkpoint) == 0 {
+			if state.Version != 3 || len(state.Checkpoint) == 0 {
 				t.Error("side effect started without Eino checkpoint")
 			}
 			messages, err := s.Messages(ctx, "owner", r.SessionID, 0, 200)
@@ -235,23 +235,33 @@ func TestEinoPreservesLiteralPromptAndHistory(t *testing.T) {
 }
 
 func TestEinoDoesNotRestartLegacyExecution(t *testing.T) {
-	s, _ := testDB(t)
-	ctx := context.Background()
-	r := submit(t, s, "read", durable.ReadOnly)
-	claimed := getClaim(t, s)
-	claimed.State = json.RawMessage(`{"version":1,"turn":1,"waitingStep":"old"}`)
-	e := &engine.Engine{
-		Store: s,
-		Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
-			t.Fatal("legacy state must not start a new agent")
-			return nil, nil, nil
-		},
-	}
-	if err := e.Execute(ctx, claimed); err != nil {
-		t.Fatal(err)
-	}
-	done, err := s.Get(ctx, "owner", r.ID)
-	if err != nil || done.Status != durable.Failed || !strings.Contains(done.Error, "legacy") {
-		t.Fatalf("done=%+v err=%v", done, err)
+	for _, tc := range []struct {
+		name  string
+		state string
+	}{
+		{name: "v1", state: `{"version":1,"turn":1,"waitingStep":"old"}`},
+		{name: "v2", state: `{"version":2,"turn":1,"waitingStep":"old"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := testDB(t)
+			ctx := context.Background()
+			r := submit(t, s, "read", durable.ReadOnly)
+			claimed := getClaim(t, s)
+			claimed.State = json.RawMessage(tc.state)
+			e := &engine.Engine{
+				Store: s,
+				Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+					t.Fatal("legacy state must not start a new agent")
+					return nil, nil, nil
+				},
+			}
+			if err := e.Execute(ctx, claimed); err != nil {
+				t.Fatal(err)
+			}
+			done, err := s.Get(ctx, "owner", r.ID)
+			if err != nil || done.Status != durable.Failed || !strings.Contains(done.Error, "legacy") {
+				t.Fatalf("done=%+v err=%v", done, err)
+			}
+		})
 	}
 }

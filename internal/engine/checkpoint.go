@@ -9,13 +9,16 @@ import (
 	"github.com/cloudwego/eino/adk"
 )
 
-// State is a storage envelope. Agent messages, pending tools and iteration state
-// belong to the opaque Eino checkpoint, not a second platform execution loop.
+// State is a storage envelope. Agent messages and the ReAct loop belong to the
+// opaque Eino checkpoint; these fields track only execution budgets, waiting
+// state and the durable terminal-tool result.
 type State struct {
-	Version     int    `json:"version"`
-	Checkpoint  []byte `json:"checkpoint,omitempty"`
-	Turn        int    `json:"turn"`
-	WaitingStep string `json:"waitingStep,omitempty"`
+	Version            int     `json:"version"`
+	Checkpoint         []byte  `json:"checkpoint,omitempty"`
+	Turn               int     `json:"turn"`
+	WaitingStep        string  `json:"waitingStep,omitempty"`
+	ReturnDirectlyStep string  `json:"returnDirectlyStep,omitempty"`
+	Final              *string `json:"final,omitempty"`
 }
 
 type execution struct {
@@ -65,6 +68,9 @@ func (s *execution) Set(ctx context.Context, id string, checkpoint []byte) error
 	if s.pauseStatus == "" {
 		return errors.New("unexpected Eino checkpoint without a decision or pause")
 	}
+	// A later clarification or review owns the next model turn; clear any
+	// provisional direct-tool result so it cannot bypass the human answer.
+	s.state.Final = nil
 	kind := "RunNeedsReview"
 	if s.pauseStatus == durable.WaitingClarification {
 		kind = "ClarificationRequested"

@@ -4,3 +4,35 @@ image:
   pullPolicy: IfNotPresent
 existingSecret: ""
 replicas: 1
+
+# 原生 server-go TOML；敏感值通过 existingSecret 提供的环境变量读取。
+applicationConfig: |
+  AppName = "agentic-kit-worker"
+  AppCode = 101
+  RunMode = "${env:GIN_MODE:release}"
+
+  [HTTPServer]
+  Listen = "${env:LISTEN_ADDR:127.0.0.1:8081}"
+  ReadTimeout = 10000
+  WriteTimeout = 10000
+  IdleTimeout = 60000
+
+  [DB]
+  Driver = "PostgreSQL"
+  DSN = "${env:DATABASE_URL}"
+  AutoMigrate = false
+  MaxOpenConns = 20
+  MaxIdleConns = 5
+  ConnMaxIdleTime = 300
+
+  [Worker]
+  Concurrency = "${env:WORKER_CONCURRENCY:4}"
+  Lease = "${env:WORKER_LEASE:30s}"
+  Poll = "${env:WORKER_POLL:1s}"
+
+# 独立日志 TOML；可配置 Level 和 Outputs，不解析占位符。
+loggerConfig: |
+  Level = "Info"
+
+  [[Outputs]]
+  Type = "Console"

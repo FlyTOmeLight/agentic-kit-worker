@@ -33,6 +33,12 @@ func (m *boundaryModel) Generate(
 	opts ...model.Option,
 ) (*schema.Message, error) {
 	s := m.execution
+	if s.state.Final != nil {
+		return schema.AssistantMessage(*s.state.Final, nil), nil
+	}
+	if s.state.Turn >= s.run.Spec.MaxTurns {
+		return nil, fmt.Errorf("model turn limit exceeded: %d", s.run.Spec.MaxTurns)
+	}
 	if err := s.store.Save(ctx, s.run.Lease(), s.encode(), durable.Running, "", "", "ModelStarted"); err != nil {
 		return nil, err
 	}
@@ -50,6 +56,7 @@ func (m *boundaryModel) Generate(
 	}
 	s.state.Turn++
 	s.state.WaitingStep = ""
+	s.state.ReturnDirectlyStep = ""
 
 	if len(msg.ToolCalls) > 0 {
 		var batchError error
@@ -76,6 +83,10 @@ func (m *boundaryModel) Generate(
 			inputError := batchError
 			if inputError == nil && binding.EndRun && binding.Validate != nil {
 				inputError = binding.Validate(call.Function.Arguments)
+			}
+			if inputError == nil && s.state.ReturnDirectlyStep == "" &&
+				(binding.EndRun || binding.ReturnDirectly) {
+				s.state.ReturnDirectlyStep = call.ID
 			}
 			if inputError != nil {
 				call.Function.Name = invalidInputTool
@@ -123,11 +134,7 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 		}
 		if cached {
 			s.state.WaitingStep = ""
-			if binding.EndRun && !toolHasError(result) {
-				if err = adk.SendToolGenAction(ctx, input.Name, adk.NewExitAction()); err != nil {
-					return nil, err
-				}
-			}
+			s.recordReturnDirectly(input.CallID, result)
 			return &compose.ToolOutput{Result: result}, nil
 		}
 		if input.Name == "ask_for_clarification" {
@@ -178,16 +185,21 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 		}
 		// After a crash, BeginStep supplies this committed result to Eino without
 		// invoking the external tool again, even if the checkpoint precedes the batch.
+		previousFinal := s.state.Final
+		s.recordReturnDirectly(input.CallID, output.Result)
 		if err = s.store.FinishStep(ctx, s.run.Lease(), input.CallID, output.Result, s.encode()); err != nil {
+			s.state.Final = previousFinal
 			s.toolError = err
 			return nil, err
 		}
-		if binding.EndRun && !toolHasError(output.Result) {
-			if err = adk.SendToolGenAction(ctx, input.Name, adk.NewExitAction()); err != nil {
-				return nil, err
-			}
-		}
 		return output, nil
+	}
+}
+
+func (s *execution) recordReturnDirectly(callID, result string) {
+	if callID == s.state.ReturnDirectlyStep && !toolHasError(result) {
+		final := result
+		s.state.Final = &final
 	}
 }
 

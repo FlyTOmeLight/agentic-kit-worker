@@ -4,49 +4,20 @@ import (
 	"context"
 	"errors"
 
-	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
-	"github.com/FlyTOmeLight/server-go/logger"
 	"github.com/gin-gonic/gin"
 
-	"github.com/FlyTOmeLight/agentic-kit-worker/internal/adapters"
-	"github.com/FlyTOmeLight/agentic-kit-worker/internal/config"
 	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
-// Worker owns the execution goroutine and its database connection.
-// Bootstrap and HTTPHost invoke its lifecycle methods in sequence.
+// Worker owns the execution goroutine and borrows its initialized dependencies.
 type Worker struct {
-	cfg    config.Config
-	log    *logger.Logger
-	store  *durable.Store
 	worker *engine.Worker
 	cancel context.CancelFunc
 	done   chan struct{}
 	err    error
 }
 
-func New(cfg config.Config, log *logger.Logger) *Worker { return &Worker{cfg: cfg, log: log} }
-
-func (s *Worker) Initialize(ctx context.Context) error {
-	store, err := durable.Open(ctx, s.cfg.Database.URL)
-	if err != nil {
-		return err
-	}
-	w := &engine.Worker{
-		Engine:      &engine.Engine{Store: store, Build: adapters.Build},
-		Log:         s.log,
-		ID:          durable.NewID(),
-		Concurrency: s.cfg.Worker.Concurrency,
-		Lease:       s.cfg.Worker.Lease,
-		Poll:        s.cfg.Worker.Poll,
-	}
-	if err := w.Validate(); err != nil {
-		store.Close()
-		return err
-	}
-	s.store, s.worker = store, w
-	return nil
-}
+func New(worker *engine.Worker) *Worker { return &Worker{worker: worker} }
 
 func (s *Worker) RegisterRoutes(*gin.RouterGroup) error { return nil }
 
@@ -83,16 +54,4 @@ func (s *Worker) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-}
-
-func (s *Worker) Close(ctx context.Context) error {
-	if err := s.Stop(ctx); err != nil {
-		return err
-	}
-	if s.store != nil {
-		s.store.Close()
-		s.store = nil
-		s.worker = nil
-	}
-	return nil
 }
