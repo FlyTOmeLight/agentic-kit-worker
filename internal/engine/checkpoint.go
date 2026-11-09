@@ -7,6 +7,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 
+	"github.com/FlyTOmeLight/agentic-kit-api/pkg/contextbuilder"
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 )
 
@@ -31,6 +32,7 @@ type execution struct {
 	pending   *durable.Boundary
 	retry     bool
 	toolError error
+	snapshot  *contextbuilder.Snapshot
 }
 
 func (s *execution) encode() json.RawMessage {
@@ -77,4 +79,16 @@ func (s *execution) Set(ctx context.Context, id string, checkpoint []byte) error
 	pause := *s.pending
 	pause.State = s.encode()
 	return s.store.CommitBoundary(ctx, s.run.Lease(), pause)
+}
+
+func (s *execution) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
+	if s.snapshot == nil {
+		return ctx, state, nil
+	}
+	built, err := s.buildContext(ctx, state.Messages)
+	if err != nil {
+		return ctx, nil, err
+	}
+	state.Messages = built
+	return ctx, state, nil
 }
