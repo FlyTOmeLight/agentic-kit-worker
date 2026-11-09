@@ -5,10 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/cloudwego/eino/schema"
-
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/contextbuilder"
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
+	"github.com/cloudwego/eino/schema"
 )
 
 func decodeSnapshot(run *durable.Run) (*contextbuilder.Snapshot, error) {
