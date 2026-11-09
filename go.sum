@@ -8,8 +8,8 @@ github.com/ClickHouse/ch-go v0.74.0 h1:uYs2m4wIt0ZHSM1E72rg0maCfzhR2V3xWb/vZEgpe
 github.com/ClickHouse/ch-go v0.74.0/go.mod h1:sZ/r+8ttZMjyrP9PuFbgoVbth1ywIu2LIQNA2vgko6M=
 github.com/ClickHouse/clickhouse-go/v2 v2.49.0 h1:HgiLTraLGgMe8kYivQ6RzMHDUkU/uFUpsWEAuhVk34Q=
 github.com/ClickHouse/clickhouse-go/v2 v2.49.0/go.mod h1:o8dSgGJGxY7CeWFNiKusF9a5RnLpgzuo7OaNyH0NQPE=
-github.com/FlyTOmeLight/agentic-kit-api v0.5.3-0.20261109081013-2262314738e7 h1:v/gRwewgubHoU8G/RKwfqDXzMxgPNyg728+1G8WI4tA=
-github.com/FlyTOmeLight/agentic-kit-api v0.5.3-0.20261109081013-2262314738e7/go.mod h1:bzqblNavX+3YKrwjL57S5YeYmNAgrw2/O9oLcHhO840=
+github.com/FlyTOmeLight/agentic-kit-api v0.5.3-0.20261109084442-13bb3b2993c9 h1:CxzytPKLklFw0Q6wBp5p7PVu9NxpH1wiTZ0nUFYWiyA=
+github.com/FlyTOmeLight/agentic-kit-api v0.5.3-0.20261109084442-13bb3b2993c9/go.mod h1:bzqblNavX+3YKrwjL57S5YeYmNAgrw2/O9oLcHhO840=
 github.com/FlyTOmeLight/server-go v0.12.0 h1:DVwQlhXhHkXeTt5eMI7lU+x1i4mOPmpOmFEsU83E1mc=
 github.com/FlyTOmeLight/server-go v0.12.0/go.mod h1:CvfXyE9tnPp2jKq7HGp/3yGzOxwNhy4Z8pipUolHYJQ=
 github.com/HuaweiCloudDeveloper/gaussdb-go v1.0.0-rc1 h1:OIZ83SgbK0ImF/vKFSfNoCAQWQySx5sYhj0RgsWbMbA=

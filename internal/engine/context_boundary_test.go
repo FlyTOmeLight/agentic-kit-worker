@@ -48,7 +48,7 @@ func TestBuildContextUsesExplicitEmptyTools(t *testing.T) {
 			Budget: contextbuilder.Budget{MaxInputBytes: 100},
 		},
 	}
-	messages, err := state.buildContext([]*schema.Message{schema.UserMessage("question")}, nil)
+	messages, _, err := state.buildContext([]*schema.Message{schema.UserMessage("question")}, nil)
 	if err != nil || len(messages) != 1 || messages[0].Content != "question" {
 		t.Fatalf("empty active tools must replace frozen tools: messages=%+v error=%v", messages, err)
 	}

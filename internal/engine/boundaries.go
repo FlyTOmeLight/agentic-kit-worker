@@ -40,13 +40,14 @@ func (m *boundaryModel) Generate(
 		return nil, fmt.Errorf("model turn limit exceeded: %d", s.run.Spec.MaxTurns)
 	}
 	options := model.GetCommonOptions(&model.Options{}, opts...)
-	input, err := s.buildContext(input, options.Tools)
+	input, contextInfo, err := s.buildContext(input, options.Tools)
 	if err != nil {
 		return nil, err
 	}
 	if err := s.store.CommitBoundary(ctx, s.run.Lease(), durable.Boundary{
-		Kind:  durable.BoundaryModelStarted,
-		State: s.encode(),
+		Kind:    durable.BoundaryModelStarted,
+		State:   s.encode(),
+		Context: contextInfo,
 	}); err != nil {
 		return nil, err
 	}

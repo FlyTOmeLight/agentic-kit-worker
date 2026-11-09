@@ -140,9 +140,9 @@ func toSchemaMessages(messages []contextbuilder.Message) []*schema.Message {
 func (s *execution) buildContext(
 	stateMessages []*schema.Message,
 	toolInfos []*schema.ToolInfo,
-) ([]*schema.Message, error) {
+) ([]*schema.Message, *durable.ContextInfo, error) {
 	if s.snapshot == nil {
-		return stateMessages, nil
+		return stateMessages, nil, nil
 	}
 
 	// Locate the current turn in stateMessages. The current turn starts with the
@@ -160,7 +160,7 @@ func (s *execution) buildContext(
 		for _, m := range stateMessages[userIndex:] {
 			cmsg, err := toContextMessage(m)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			currentTurn = append(currentTurn, cmsg)
 		}
@@ -176,15 +176,15 @@ func (s *execution) buildContext(
 	materials.Tools = make([]contextbuilder.ToolDefinition, 0, len(toolInfos))
 	for _, info := range toolInfos {
 		if info == nil {
-			return nil, errors.New("nil tool definition")
+			return nil, nil, errors.New("nil tool definition")
 		}
 		parameters, err := info.ParamsOneOf.ToJSONSchema()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		encoded, err := json.Marshal(parameters)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		materials.Tools = append(materials.Tools, contextbuilder.ToolDefinition{
 			Name: info.Name, Description: info.Desc, Parameters: encoded,
@@ -192,7 +192,7 @@ func (s *execution) buildContext(
 	}
 	counter, err := contextbuilder.ResolveCounter(s.snapshot.Budget.CounterVersion)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	result, err := contextbuilder.Build(contextbuilder.BuildInput{
 		FrozenMaterials: materials,
@@ -202,8 +202,36 @@ func (s *execution) buildContext(
 		Counter:         counter,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return toSchemaMessages(result.Messages), nil
+	// Map contextbuilder sources to the execution-layer ContextInfo type.
+	var omitted []durable.Source
+	for _, o := range result.OmittedSources {
+		omitted = append(omitted, durable.Source{
+			Kind:     string(o.Source.Kind),
+			ID:       o.Source.ID,
+			Revision: o.Source.Revision,
+			Version:  o.Source.Version,
+		})
+	}
+	var collapsed []durable.Source
+	for _, c := range result.CollapsedSources {
+		collapsed = append(collapsed, durable.Source{
+			Kind:     string(c.Kind),
+			ID:       c.ID,
+			Revision: c.Revision,
+			Version:  c.Version,
+		})
+	}
+	info := &durable.ContextInfo{
+		InputTokens:      result.Usage.InputTokens,
+		InputBytes:       result.Usage.InputBytes,
+		TokenLimit:       result.Usage.TokenLimit,
+		ByteLimit:        result.Usage.ByteLimit,
+		OutputReserve:    result.Usage.OutputReserve,
+		OmittedSources:   omitted,
+		CollapsedSources: collapsed,
+	}
+	return toSchemaMessages(result.Messages), info, nil
 }
