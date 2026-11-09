@@ -1,7 +1,7 @@
 package engine
 
 import (
-	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -37,7 +37,10 @@ func decodeSnapshot(run *durable.Run) (*contextbuilder.Snapshot, error) {
 			})
 			if msg.Role == "assistant" {
 				groups = append(groups, contextbuilder.MessageGroup{
-					Source:   contextbuilder.Source{Kind: contextbuilder.SourceHistory, ID: fmt.Sprintf("hist-%d", len(groups))},
+					Source: contextbuilder.Source{
+						Kind: contextbuilder.SourceHistory,
+						ID:   fmt.Sprintf("hist-%d", len(groups)),
+					},
 					Messages: currentGroup,
 				})
 				currentGroup = nil
@@ -45,7 +48,10 @@ func decodeSnapshot(run *durable.Run) (*contextbuilder.Snapshot, error) {
 		}
 		if len(currentGroup) > 0 {
 			groups = append(groups, contextbuilder.MessageGroup{
-				Source:   contextbuilder.Source{Kind: contextbuilder.SourceHistory, ID: fmt.Sprintf("hist-%d", len(groups))},
+				Source: contextbuilder.Source{
+					Kind: contextbuilder.SourceHistory,
+					ID:   fmt.Sprintf("hist-%d", len(groups)),
+				},
 				Messages: currentGroup,
 			})
 		}
@@ -132,7 +138,10 @@ func toSchemaMessages(messages []contextbuilder.Message) []*schema.Message {
 // buildContext selects materials and verifies input limits for the current
 // turn. When over budget, it omits low-priority memory and oldest history
 // turns. If required inputs exceed the budget, it returns a BudgetExceededError.
-func (s *execution) buildContext(ctx context.Context, stateMessages []*schema.Message) ([]*schema.Message, error) {
+func (s *execution) buildContext(
+	stateMessages []*schema.Message,
+	toolInfos []*schema.ToolInfo,
+) ([]*schema.Message, error) {
 	if s.snapshot == nil {
 		return stateMessages, nil
 	}
@@ -164,11 +173,34 @@ func (s *execution) buildContext(ctx context.Context, stateMessages []*schema.Me
 		}}
 	}
 
+	materials := s.snapshot.Materials
+	materials.Tools = make([]contextbuilder.ToolDefinition, 0, len(toolInfos))
+	for _, info := range toolInfos {
+		if info == nil {
+			return nil, errors.New("nil tool definition")
+		}
+		parameters, err := info.ParamsOneOf.ToJSONSchema()
+		if err != nil {
+			return nil, err
+		}
+		encoded, err := json.Marshal(parameters)
+		if err != nil {
+			return nil, err
+		}
+		materials.Tools = append(materials.Tools, contextbuilder.ToolDefinition{
+			Name: info.Name, Description: info.Desc, Parameters: encoded,
+		})
+	}
+	counter, err := contextbuilder.ResolveCounter(s.snapshot.Budget.CounterVersion)
+	if err != nil {
+		return nil, err
+	}
 	result, err := contextbuilder.Build(contextbuilder.BuildInput{
-		FrozenMaterials: s.snapshot.Materials,
+		FrozenMaterials: materials,
 		CurrentTurn:     currentTurn,
 		Policy:          s.snapshot.Policy,
 		Budget:          s.snapshot.Budget,
+		Counter:         counter,
 	})
 	if err != nil {
 		return nil, err

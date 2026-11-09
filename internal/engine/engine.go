@@ -164,11 +164,7 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 	} else {
 		var messages []*schema.Message
 		if s.snapshot != nil {
-			built, err := s.buildContext(ctx, nil)
-			if err != nil {
-				return s.fail(ctx, err)
-			}
-			messages = built
+			messages = []*schema.Message{schema.UserMessage(run.Spec.Query)}
 		} else {
 			for _, msg := range run.Spec.History {
 				messages = append(

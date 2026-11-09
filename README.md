@@ -6,6 +6,8 @@
 
 ## 项目结构
 
+上下文分支配套 API 的 `pkg/contextbuilder`，通过本地 `go.work` 联调，尚未更新正式发布依赖。每次真实模型调用在 `boundaryModel.Generate` 中构建上下文，并计入该次调用实际绑定的工具定义。构建只替换发给模型的消息，Eino checkpoint、持久化工具结果和冻结材料保留完整内容；不通过 `BeforeModelRewriteState` 保存裁剪结果。新 Run 的 `context-v2` 先移除低优先级 Memory，再折叠历史工具过程、保留问答，仍超限才淘汰整轮；旧 `context-v1` 仍按原规则处理。大工具输出使用 UTF-8 安全首尾预览，必需输入仍超预算时以 Failed 结束，不调用模型或自动重试。配置模型窗口后使用保守字节估算，不代表精确 token 计数。
+
 入口位于 `cmd/worker`，server-go 生命周期与资源装配位于 `internal/service`，执行器位于 `internal/engine`，模型与工具适配位于 `internal/adapters`。数据库访问统一由 API 的 `pkg/durable` 使用 GORM 管理，worker 复用其中的事务和状态操作；[目录与依赖说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/layout.md)。
 
 ## Agent 架构与执行规则

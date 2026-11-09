@@ -80,15 +80,3 @@ func (s *execution) Set(ctx context.Context, id string, checkpoint []byte) error
 	pause.State = s.encode()
 	return s.store.CommitBoundary(ctx, s.run.Lease(), pause)
 }
-
-func (s *execution) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
-	if s.snapshot == nil {
-		return ctx, state, nil
-	}
-	built, err := s.buildContext(ctx, state.Messages)
-	if err != nil {
-		return ctx, nil, err
-	}
-	state.Messages = built
-	return ctx, state, nil
-}

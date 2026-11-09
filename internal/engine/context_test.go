@@ -27,12 +27,18 @@ func sampleSnapshot(t *testing.T, budget contextbuilder.Budget) durable.ContextS
 			}},
 			Memory: []contextbuilder.ContextBlock{
 				{
-					Source:   contextbuilder.Source{Kind: contextbuilder.SourceMemory, ID: "mem-low"},
+					Source: contextbuilder.Source{
+						Kind: contextbuilder.SourceMemory,
+						ID:   "mem-low",
+					},
 					Content:  "Low priority reference info.",
 					Priority: 10,
 				},
 				{
-					Source:   contextbuilder.Source{Kind: contextbuilder.SourceMemory, ID: "mem-high"},
+					Source: contextbuilder.Source{
+						Kind: contextbuilder.SourceMemory,
+						ID:   "mem-high",
+					},
 					Content:  "High priority reference info.",
 					Priority: 100,
 				},
@@ -43,11 +49,17 @@ func sampleSnapshot(t *testing.T, budget contextbuilder.Budget) durable.ContextS
 					Messages: []contextbuilder.Message{
 						{Role: contextbuilder.RoleUser, Content: "turn 1 question"},
 						{
-							Role:      contextbuilder.RoleAssistant,
-							Content:   "searching",
-							ToolCalls: []contextbuilder.ToolCall{{ID: "c1", Name: "lookup", Arguments: "{}"}},
+							Role:    contextbuilder.RoleAssistant,
+							Content: "searching",
+							ToolCalls: []contextbuilder.ToolCall{
+								{ID: "c1", Name: "lookup", Arguments: "{}"},
+							},
 						},
-						{Role: contextbuilder.RoleTool, ToolCallID: "c1", Content: "turn 1 result"},
+						{
+							Role:       contextbuilder.RoleTool,
+							ToolCallID: "c1",
+							Content:    "turn 1 result",
+						},
 						{Role: contextbuilder.RoleAssistant, Content: "turn 1 answer"},
 					},
 				},
@@ -103,7 +115,8 @@ func TestEinoExecutesWithContextSnapshot(t *testing.T) {
 						t.Errorf("history turn was omitted unexpectedly: %+v", msgs)
 					}
 					// Must end with the current turn query
-					if msgs[len(msgs)-1].Role != schema.User || msgs[len(msgs)-1].Content != "do work" {
+					if msgs[len(msgs)-1].Role != schema.User ||
+						msgs[len(msgs)-1].Content != "do work" {
 						t.Errorf("current turn query mismatch: %+v", msgs[len(msgs)-1])
 					}
 					return schema.AssistantMessage("finished successfully", nil), nil
@@ -131,7 +144,7 @@ func TestEinoTrimsContextUnderBudget(t *testing.T) {
 	claimed := getClaim(t, s)
 	// Set byte budget small enough that lowest-priority memory must be trimmed
 	claimed.ContextSnapshot = sampleSnapshot(t, contextbuilder.Budget{
-		MaxInputBytes: 580,
+		MaxInputBytes: 550,
 	})
 
 	var modelCalls int
@@ -145,7 +158,7 @@ func TestEinoTrimsContextUnderBudget(t *testing.T) {
 					if !strings.Contains(msgs[0].Content, "High priority reference info.") {
 						t.Errorf("high priority memory missing: %s", msgs[0].Content)
 					}
-					// Low priority memory should have been trimmed to fit the 380-byte budget
+					// Low priority memory should have been trimmed to fit the budget.
 					if strings.Contains(msgs[0].Content, "Low priority reference info.") {
 						t.Errorf("low priority memory was not trimmed: %s", msgs[0].Content)
 					}
@@ -226,7 +239,9 @@ func TestEinoFailsWhenToolOutputExceedsBudgetDuringExecution(t *testing.T) {
 				generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
 					modelCalls++
 					if msgs[len(msgs)-1].Role == schema.Tool {
-						t.Fatal("second model call must not happen if tool output exceeded budget")
+						t.Fatal(
+							"second model call must not happen if tool output exceeded budget",
+						)
 					}
 					// First call: emit tool call
 					return &schema.Message{
