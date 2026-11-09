@@ -225,13 +225,14 @@ func (s *execution) buildContext(
 		})
 	}
 	info := &durable.ContextInfo{
-		InputTokens:      result.Usage.InputTokens,
-		InputBytes:       result.Usage.InputBytes,
-		TokenLimit:       result.Usage.TokenLimit,
-		ByteLimit:        result.Usage.ByteLimit,
-		OutputReserve:    result.Usage.OutputReserve,
-		OmittedSources:   omitted,
-		CollapsedSources: collapsed,
+		InputTokens:          result.Usage.InputTokens,
+		InputBytes:           result.Usage.InputBytes,
+		TokenLimit:           result.Usage.TokenLimit,
+		ByteLimit:            result.Usage.ByteLimit,
+		OutputReserve:        result.Usage.OutputReserve,
+		OmittedSources:       omitted,
+		CollapsedSources:     collapsed,
+		ProjectedToolResults: result.ProjectedToolResults,
 	}
 	return toSchemaMessages(result.Messages), info, nil
 }

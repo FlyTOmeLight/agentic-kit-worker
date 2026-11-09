@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -54,5 +55,74 @@ func TestBuildContextUsesExplicitEmptyTools(t *testing.T) {
 	}
 	if len(state.snapshot.Materials.Tools) != 1 {
 		t.Fatal("frozen snapshot mutated")
+	}
+}
+
+func TestBuildContextProjectsOlderCurrentToolResults(t *testing.T) {
+	state := &execution{
+		run: &durable.Run{Spec: durable.Spec{Query: "question"}},
+		snapshot: &contextbuilder.Snapshot{
+			Policy: contextbuilder.Policy{
+				Version:               contextbuilder.PolicyVersionV3,
+				KeepRecentToolResults: 2,
+			},
+			Budget: contextbuilder.Budget{CounterVersion: contextbuilder.ByteEstimateVersion},
+		},
+	}
+	content := strings.Repeat("result ", 50)
+	messages := []*schema.Message{schema.UserMessage("question")}
+	for index := 0; index < 5; index++ {
+		id := fmt.Sprintf("call-%d", index)
+		messages = append(messages,
+			&schema.Message{
+				Role: schema.Assistant,
+				ToolCalls: []schema.ToolCall{{
+					ID:       id,
+					Type:     "function",
+					Function: schema.FunctionCall{Name: "read"},
+				}},
+			},
+			schema.ToolMessage(content, id),
+		)
+	}
+
+	_, full, err := state.buildContext(messages, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.ProjectedToolResults != 0 {
+		t.Fatalf("unlimited build projected %d results", full.ProjectedToolResults)
+	}
+	state.snapshot.Budget.MaxInputBytes = full.InputBytes - 1
+	built, info, err := state.buildContext(messages, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ProjectedToolResults != 3 {
+		t.Fatalf("projected %d, want 3", info.ProjectedToolResults)
+	}
+	if info.InputBytes > state.snapshot.Budget.MaxInputBytes || info.InputBytes >= full.InputBytes {
+		t.Fatalf("usage %d, want within %d and below %d",
+			info.InputBytes, state.snapshot.Budget.MaxInputBytes, full.InputBytes)
+	}
+	var markers, intact int
+	for _, message := range built {
+		if message.Role != schema.Tool {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(message.Content, "[Tool result projected:"):
+			markers++
+		case message.Content == content:
+			intact++
+		default:
+			t.Fatalf("unexpected tool content: %q", message.Content)
+		}
+	}
+	if markers != 3 || intact != 2 {
+		t.Fatalf("markers=%d intact=%d, want 3 and 2", markers, intact)
+	}
+	if messages[2].Content != content {
+		t.Fatal("projection mutated the Eino state messages")
 	}
 }
