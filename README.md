@@ -2,9 +2,11 @@
 
 独立部署的 Agent 执行进程。从 PostgreSQL 领取任务，用 Eino ADK `ChatModelAgent + Runner` 执行单 Agent ReAct。Eino 管理模型／工具循环、消息上下文和 checkpoint；平台保存 checkpoint、执行权与工具结果，进程重启后由其他实例接管。
 
-与 `agentic-kit-api v0.5.3-0.20261017191628-5f8a296bfacc`（main 提交 `5f8a296`）配套，Worker 在 `go.mod` 中固定引用。使用 Go 1.27.1、server-go v0.9.0，Eino 保持 v0.9.2。两个仓库可独立克隆和构建。运行方式、模块认证与可选 go work 联合开发见 [API 启动说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/README.md)。
+与 `agentic-kit-api v0.5.3-0.20261109081013-2262314738e7`（main 提交 `2262314`）配套，Worker 在 `go.mod` 中固定引用。使用 Go 1.27.1、server-go v0.12.0，Eino 保持 v0.9.2。两个仓库可独立克隆和构建。运行方式、模块认证与可选 go work 联合开发见 [API 启动说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/README.md)。
 
 ## 项目结构
+
+上下文构建复用 API 的 `pkg/contextbuilder`。每次真实模型调用在 `boundaryModel.Generate` 中构建上下文，并计入该次调用实际绑定的工具定义。构建只替换发给模型的消息，Eino checkpoint、持久化工具结果和冻结材料保留完整内容；不通过 `BeforeModelRewriteState` 保存裁剪结果。新 Run 的 `context-v2` 先移除低优先级 Memory，再折叠历史工具过程、保留问答，仍超限才淘汰整轮；旧 `context-v1` 仍按原规则处理。大工具输出使用 UTF-8 安全首尾预览，必需输入仍超预算时以 Failed 结束，不调用模型或自动重试。配置模型窗口后使用保守字节估算，不代表精确 token 计数。
 
 入口位于 `cmd/worker`，server-go 生命周期与资源装配位于 `internal/service`，执行器位于 `internal/engine`，模型与工具适配位于 `internal/adapters`。数据库访问统一由 API 的 `pkg/durable` 使用 GORM 管理，worker 复用其中的事务和状态操作；[目录与依赖说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/layout.md)。
 
@@ -34,7 +36,7 @@ export DATABASE_URL='postgres://<user>:<password>@<host>:5432/<database>?sslmode
 go run ./cmd/worker -log-config conf/server/logger.toml
 ```
 
-应用通过 server-go v0.9.0 的 `app.Run` 加载一份配置快照。配置路径按 `-config`、`CONFIG_FILE`、`SERVER_CONFIG_PATH`、`conf/server/config.toml` 的顺序选取，文件必须存在。自定义文件可通过 `go run ./cmd/worker -config /absolute/path/config.toml` 指定。
+应用通过 server-go v0.12.0 的 `app.Run` 加载一份配置快照。配置路径按 `-config`、`CONFIG_FILE`、`SERVER_CONFIG_PATH`、`conf/server/config.toml` 的顺序选取，文件必须存在。自定义文件可通过 `go run ./cmd/worker -config /absolute/path/config.toml` 指定。
 
 应用配置支持框架的 `${env:NAME[:default]}`、`${file:/path}` 和 `${secret:...}` 占位符。环境变量通过文件中的占位符读取，不自动覆盖任意 TOML 字段。占位符缺少必需值或无法解析时，启动失败。随附配置使用以下字段：
 

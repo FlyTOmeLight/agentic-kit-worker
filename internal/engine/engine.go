@@ -56,19 +56,20 @@ func OperationID(ctx context.Context) string {
 func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 	ctx = context.WithValue(ctx, executionKey{}, Execution{RunID: run.ID, Epoch: run.Epoch})
 	s := &execution{store: e.Store, run: run}
+	snapshot, err := decodeSnapshot(run)
+	if err != nil {
+		return s.fail(ctx, err)
+	}
+	s.snapshot = snapshot
 	if err := json.Unmarshal(run.State, &s.state); err != nil {
 		return err
 	}
 	if s.state.Version != 0 && s.state.Version != 3 {
-		return e.Store.Save(
-			ctx,
-			run.Lease(),
-			run.State,
-			durable.Failed,
-			"",
-			"unsupported execution state; drain legacy runs before upgrading the worker",
-			"RunFailed",
-		)
+		return e.Store.CommitBoundary(ctx, run.Lease(), durable.Boundary{
+			Kind:   durable.BoundaryFail,
+			State:  run.State,
+			Detail: "unsupported execution state; drain legacy runs before upgrading the worker",
+		})
 	}
 	s.state.Version = 3
 	llm, bindings, err := e.Build(ctx, run.Spec)
@@ -120,6 +121,9 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 		MaxIterations: maxIterations,
 		// Published prompts are literal text, not templates.
 		GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
+			if s.snapshot != nil {
+				return input.Messages, nil
+			}
 			return append([]*schema.Message{schema.SystemMessage(instruction)}, input.Messages...), nil
 		},
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
@@ -158,13 +162,17 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 		iter, err = runner.Resume(ctx, run.ID)
 	} else {
 		var messages []*schema.Message
-		for _, msg := range run.Spec.History {
-			messages = append(
-				messages,
-				&schema.Message{Role: schema.RoleType(msg.Role), Content: msg.Content},
-			)
+		if s.snapshot != nil {
+			messages = []*schema.Message{schema.UserMessage(run.Spec.Query)}
+		} else {
+			for _, msg := range run.Spec.History {
+				messages = append(
+					messages,
+					&schema.Message{Role: schema.RoleType(msg.Role), Content: msg.Content},
+				)
+			}
+			messages = append(messages, schema.UserMessage(run.Spec.Query))
 		}
-		messages = append(messages, schema.UserMessage(run.Spec.Query))
 		iter = runner.Run(ctx, messages, adk.WithCheckPointID(run.ID))
 	}
 	// Eino owns the ReAct loop. This loop consumes events and resumes automatic
@@ -193,7 +201,7 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 		if err != nil {
 			break
 		}
-		if s.pauseStatus != "" {
+		if s.pending != nil {
 			// A later clarification or review owns the next model turn; clear any
 			// provisional direct-tool result so it cannot bypass the human answer.
 			s.state.Final = nil
@@ -209,7 +217,11 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 		if final == nil {
 			return s.fail(ctx, errors.New("Eino runner ended without a final response"))
 		}
-		return e.Store.Save(ctx, run.Lease(), s.encode(), durable.Completed, final.Content, "", "RunCompleted")
+		return e.Store.CommitBoundary(ctx, run.Lease(), durable.Boundary{
+			Kind:   durable.BoundaryComplete,
+			State:  s.encode(),
+			Output: final.Content,
+		})
 	}
 	if errors.Is(err, durable.ErrLeaseLost) || ctx.Err() != nil {
 		return err

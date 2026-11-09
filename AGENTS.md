@@ -3,7 +3,7 @@
 ## 目录与依赖
 
 - 调整目录或包边界前，读取 [项目布局](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/layout.md)。`cmd/worker/` 负责入口与依赖装配，`internal/engine/` 负责执行、领取与续期，`internal/adapters/` 负责模型和工具接入。
-- 跨仓库只引用API 的 `pkg/durable/`；不导入 API 的 internal 包。跨仓库集成测试通过真实 HTTP 接口访问 API。
+- 跨仓库引用 API 的 `pkg/durable/` 和 `pkg/contextbuilder/`，分别复用持久化执行契约与上下文构建；不导入 API 的 internal 包。跨仓库集成测试通过真实 HTTP 接口访问 API。
 - 默认依赖 go.mod 固定的 GitHub API 模块版本，本地联合开发使用 go work；启动、配置和测试环境见 README.md，具体命令以 Makefile 为准。
 
 ## 恢复与工具契约

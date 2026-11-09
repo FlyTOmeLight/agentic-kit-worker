@@ -39,7 +39,15 @@ func (m *boundaryModel) Generate(
 	if s.state.Turn >= s.run.Spec.MaxTurns {
 		return nil, fmt.Errorf("model turn limit exceeded: %d", s.run.Spec.MaxTurns)
 	}
-	if err := s.store.Save(ctx, s.run.Lease(), s.encode(), durable.Running, "", "", "ModelStarted"); err != nil {
+	options := model.GetCommonOptions(&model.Options{}, opts...)
+	input, err := s.buildContext(input, options.Tools)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.CommitBoundary(ctx, s.run.Lease(), durable.Boundary{
+		Kind:  durable.BoundaryModelStarted,
+		State: s.encode(),
+	}); err != nil {
 		return nil, err
 	}
 	msg, err := m.BaseChatModel.Generate(ctx, input, opts...)
@@ -55,7 +63,6 @@ func (m *boundaryModel) Generate(
 		return nil, fmt.Errorf("incomplete model response: %s", msg.ResponseMeta.FinishReason)
 	}
 	s.state.Turn++
-	s.state.WaitingStep = ""
 	s.state.ReturnDirectlyStep = ""
 
 	if len(msg.ToolCalls) > 0 {
@@ -110,7 +117,7 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 	return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
 		// Every call in this response interrupts before side effects. Runner stores
 		// its native checkpoint and the public model decision in one transaction.
-		if s.decision != nil || s.pauseStatus != "" {
+		if s.decision != nil || s.pending != nil {
 			return nil, tool.Interrupt(ctx, "save execution boundary")
 		}
 		// Eino's sequential ToolsNode visits later calls even if an earlier one failed.
@@ -118,27 +125,29 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 			return nil, s.toolError
 		}
 		binding := s.bindings[input.Name]
-		result, cached, err := s.store.BeginStep(
-			ctx,
-			s.run.Lease(),
-			input.CallID,
-			input.Name+"\x00"+input.Arguments,
-			binding.Policy,
-		)
-		if errors.Is(err, durable.ErrUncertain) {
-			return s.pause(ctx, input.CallID, durable.NeedsReview, "tool outcome unknown: "+input.Name)
-		}
+		decision, err := s.store.BeginStep(ctx, s.run.Lease(), durable.StepIntent{
+			ID:     input.CallID,
+			Input:  input.Name + "\x00" + input.Arguments,
+			Policy: binding.Policy,
+		})
 		if err != nil {
 			s.toolError = err
 			return nil, err
 		}
-		if cached {
-			s.state.WaitingStep = ""
-			s.recordReturnDirectly(input.CallID, result)
-			return &compose.ToolOutput{Result: result}, nil
+		switch decision.Outcome {
+		case durable.StepUncertain:
+			return s.pause(
+				ctx,
+				input.CallID,
+				durable.InteractionReview,
+				"tool outcome unknown: "+input.Name,
+			)
+		case durable.StepReplay:
+			s.recordReturnDirectly(input.CallID, decision.Result)
+			return &compose.ToolOutput{Result: decision.Result}, nil
 		}
 		if input.Name == "ask_for_clarification" {
-			return s.pause(ctx, input.CallID, durable.WaitingClarification, input.Arguments)
+			return s.pause(ctx, input.CallID, durable.InteractionClarification, input.Arguments)
 		}
 		if binding.Validate != nil {
 			if validationErr := binding.Validate(input.Arguments); validationErr != nil {
@@ -177,7 +186,7 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 				return &compose.ToolOutput{Result: feedback}, nil
 			}
 			if binding.Policy == durable.Unsafe {
-				return s.pause(ctx, input.CallID, durable.NeedsReview, err.Error())
+				return s.pause(ctx, input.CallID, durable.InteractionReview, err.Error())
 			}
 			s.retry = true
 			s.toolError = err
@@ -206,10 +215,13 @@ func (s *execution) recordReturnDirectly(callID, result string) {
 func (s *execution) pause(
 	ctx context.Context,
 	step string,
-	status durable.Status,
+	kind durable.InteractionKind,
 	detail string,
 ) (*compose.ToolOutput, error) {
-	s.state.WaitingStep = step
-	s.pauseStatus, s.detail = status, detail
+	boundaryKind := durable.BoundaryAwaitReview
+	if kind == durable.InteractionClarification {
+		boundaryKind = durable.BoundaryAwaitClarification
+	}
+	s.pending = &durable.Boundary{Kind: boundaryKind, Detail: detail, WaitingStep: step}
 	return nil, tool.Interrupt(ctx, "save execution boundary")
 }

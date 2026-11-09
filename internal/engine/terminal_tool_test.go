@@ -355,7 +355,7 @@ func TestReturnDirectPauseKeepsLaterReviewResult(t *testing.T) {
 		r.ID,
 		paused.WaitingStep,
 		"confirmed receipt",
-		durable.NeedsReview,
+		durable.InteractionReview,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +419,14 @@ func TestReturnDirectCachedResultDoesNotRepeatTool(t *testing.T) {
 	if err != nil || paused.Status != durable.NeedsReview || toolCalls != 1 {
 		t.Fatalf("paused=%+v tools=%d err=%v", paused, toolCalls, err)
 	}
-	if err = s.SupplyResult(ctx, "owner", r.ID, paused.WaitingStep, "receipt", durable.NeedsReview); err != nil {
+	if err = s.SupplyResult(
+		ctx,
+		"owner",
+		r.ID,
+		paused.WaitingStep,
+		"receipt",
+		durable.InteractionReview,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if err = e.Execute(ctx, getClaim(t, s)); err != nil {

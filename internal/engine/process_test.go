@@ -207,6 +207,7 @@ func buildAPI(t *testing.T) string {
 	}
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", binary, "./cmd/server")
 	cmd.Dir = strings.TrimSpace(string(dir))
+	cmd.Env = append(os.Environ(), "GOWORK=off")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build API: %v\n%s", err, output)
 	}
