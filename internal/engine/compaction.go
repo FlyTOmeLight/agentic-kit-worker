@@ -7,9 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudwego/eino/schema"
-
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
+	"github.com/cloudwego/eino/schema"
 )
 
 type SummaryInput struct {

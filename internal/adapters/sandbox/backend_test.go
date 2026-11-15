@@ -10,9 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/cloudwego/eino/adk/filesystem"
-
 	sdk "github.com/FlyTOmeLight/agentic-kit-api/sdk/go/agenticv1"
+	"github.com/cloudwego/eino/adk/filesystem"
 )
 
 type receiptClient struct {

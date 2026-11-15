@@ -9,12 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
+	sdk "github.com/FlyTOmeLight/agentic-kit-api/sdk/go/agenticv1"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-
-	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
-	sdk "github.com/FlyTOmeLight/agentic-kit-api/sdk/go/agenticv1"
 )
 
 type evaluationClient struct {

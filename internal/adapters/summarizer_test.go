@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
+
 	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
@@ -46,7 +47,8 @@ func TestSummarizerUsesIndependentModelWithoutTools(t *testing.T) {
 					if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 						t.Error(err)
 					}
-					if body.Model != "frozen-model" || len(body.Tools) != 0 || len(body.ToolChoice) != 0 ||
+					if body.Model != "frozen-model" || len(body.Tools) != 0 ||
+						len(body.ToolChoice) != 0 ||
 						body.MaxTokens != 2048 ||
 						len(body.Messages) != 2 ||
 						body.Messages[0].Role != "system" {
