@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -13,6 +14,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
+	sandboxAdapter "github.com/FlyTOmeLight/agentic-kit-worker/internal/adapters/sandbox"
 )
 
 func (s *execution) WrapModel(
@@ -39,6 +41,22 @@ func (m *boundaryModel) Generate(
 	}
 	if s.state.Turn >= s.run.Spec.MaxTurns {
 		return nil, fmt.Errorf("model turn limit exceeded: %d", s.run.Spec.MaxTurns)
+	}
+	_, err := s.store.TakePendingSteer(ctx, s.run.Lease(), func(steer string) json.RawMessage {
+		s.state.Steers = append(s.state.Steers, steer)
+		return s.encode()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if (s.summarizer != nil && s.compactionMaxBytes > 0) || s.run.CompactedSummary != "" {
+		input, err = s.projectContext(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, item := range s.state.Steers {
+		input = append(input, schema.UserMessage(item))
 	}
 	if err := s.store.CommitBoundary(ctx, s.run.Lease(), durable.Boundary{
 		Kind:  durable.BoundaryModelStarted,
@@ -141,6 +159,12 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 		case durable.StepReplay:
 			s.recordReturnDirectly(input.CallID, decision.Result)
 			return &compose.ToolOutput{Result: decision.Result}, nil
+		case durable.StepExternalWait:
+			return s.awaitExternal(
+				ctx,
+				input.CallID,
+				input.Name+": "+input.Arguments,
+			)
 		}
 		if input.Name == "ask_for_clarification" {
 			return s.pause(ctx, input.CallID, durable.InteractionClarification, input.Arguments)
@@ -161,6 +185,7 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 			}
 		}
 		ctx = context.WithValue(ctx, operationKey{}, s.run.ID+":"+input.CallID)
+		ctx = sandboxAdapter.WithOperationID(ctx, s.run.ID+":"+input.CallID)
 		output, err := next(ctx, input)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -220,4 +245,45 @@ func (s *execution) pause(
 	}
 	s.pending = &durable.Boundary{Kind: boundaryKind, Detail: detail, WaitingStep: step}
 	return nil, tool.Interrupt(ctx, "save execution boundary")
+}
+
+// awaitExternal suspends the run until the external system callback arrives.
+// The tool itself is not invoked; the step record committed by BeginStep is
+// the anchor for SupplyExternalResult.
+func (s *execution) awaitExternal(
+	ctx context.Context,
+	step string,
+	detail string,
+) (*compose.ToolOutput, error) {
+	s.pending = &durable.Boundary{
+		Kind:        durable.BoundaryAwaitExternal,
+		Detail:      detail,
+		WaitingStep: step,
+		ExternalRef: step,
+	}
+	return nil, tool.Interrupt(ctx, "save execution boundary")
+}
+
+// environmentBackend is the release contract of an environment-owning
+// backend such as the sandbox adapter.
+type environmentBackend interface {
+	Released() bool
+	Detach()
+	Close(context.Context) error
+}
+
+func finishEnvironments(ctx context.Context, bindings map[string]Binding, release bool) {
+	for _, binding := range bindings {
+		backend, ok := binding.Tool.(environmentBackend)
+		if !ok || backend.Released() {
+			continue
+		}
+		if !release {
+			backend.Detach()
+			continue
+		}
+		releaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		_ = backend.Close(releaseCtx)
+		cancel()
+	}
 }

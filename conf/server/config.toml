@@ -20,3 +20,13 @@ ConnMaxIdleTime = 300
 Concurrency = "${env:WORKER_CONCURRENCY:4}"
 Lease = "${env:WORKER_LEASE:30s}"
 Poll = "${env:WORKER_POLL:1s}"
+
+[Compaction]
+MaxInputBytes = "${env:COMPACTION_MAX_INPUT_BYTES:65536}"
+
+# Sandbox-backed goal evaluator. Leave BaseURL empty to keep the
+# fail-closed UnavailableEvaluator. TokenEnv names the environment variable
+# holding the credential; the secret value never enters configuration.
+[Evaluator]
+BaseURL = "${env:SANDBOX_CENTER_URL:}"
+TokenEnv = "${env:SANDBOX_CENTER_TOKEN_ENV:SANDBOX_CENTER_TOKEN}"

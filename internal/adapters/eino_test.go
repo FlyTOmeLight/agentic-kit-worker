@@ -31,6 +31,7 @@ func TestHTTPToolContract(t *testing.T) {
 			defer server.Close()
 			_, bindings, err := Build(
 				context.Background(),
+				nil,
 				durable.Spec{
 					Model: durable.ModelSpec{Name: "model", BaseURL: server.URL},
 					Tools: []durable.ToolSpec{
@@ -58,6 +59,7 @@ func TestHTTPToolContract(t *testing.T) {
 func TestBuildRejectsUnsupportedToolKind(t *testing.T) {
 	_, _, err := Build(
 		context.Background(),
+		nil,
 		durable.Spec{
 			Model: durable.ModelSpec{Name: "model", BaseURL: "http://localhost"},
 			Tools: []durable.ToolSpec{
@@ -93,6 +95,7 @@ func TestToolScopeComesFromFrozenRunNotModelArguments(t *testing.T) {
 	defer server.Close()
 	_, bindings, err := Build(
 		context.Background(),
+		nil,
 		durable.Spec{
 			Scope: &scope,
 			Model: durable.ModelSpec{Name: "model", BaseURL: server.URL},

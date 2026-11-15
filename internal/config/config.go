@@ -16,13 +16,28 @@ type Config struct {
 	RunMode    string
 	DB         db.Config
 	Worker     WorkerConfig
+	Evaluator  EvaluatorConfig
+	Compaction CompactionConfig
 	HTTPServer conf.HTTPServerConfig
+}
+
+type CompactionConfig struct {
+	MaxInputBytes int
 }
 
 type WorkerConfig struct {
 	Concurrency int
 	Lease       time.Duration
 	Poll        time.Duration
+}
+
+// EvaluatorConfig configures the optional sandbox-backed goal evaluator.
+// Leave BaseURL empty to keep the fail-closed UnavailableEvaluator. TokenEnv
+// names the environment variable holding the sandbox-center credential; the
+// secret value never enters configuration.
+type EvaluatorConfig struct {
+	BaseURL  string
+	TokenEnv string
 }
 
 func (cfg Config) Validate() error {
@@ -48,6 +63,12 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Worker.Poll <= 0 {
 		return errors.New("Worker.Poll must be positive")
+	}
+	if cfg.Evaluator.BaseURL != "" && cfg.Evaluator.TokenEnv == "" {
+		return errors.New("Evaluator.TokenEnv is required when BaseURL is set")
+	}
+	if cfg.Compaction.MaxInputBytes < 0 {
+		return errors.New("Compaction.MaxInputBytes must not be negative")
 	}
 	_, port, err := net.SplitHostPort(cfg.HTTPServer.Listen)
 	number, portErr := strconv.Atoi(port)

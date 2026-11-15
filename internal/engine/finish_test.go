@@ -17,48 +17,29 @@ import (
 func TestFinishBatchRejectsSideEffectsThenExits(t *testing.T) {
 	s, _ := testDB(t)
 	ctx := context.Background()
-	a, err := s.CreateAgent(
-		ctx,
-		"owner",
-		"finish-test",
-		durable.AgentConfig{
-			Model:    durable.ModelSpec{Name: "test", BaseURL: "http://localhost/v1"},
-			MaxTurns: 5,
-			Tools: []durable.ToolSpec{
-				{
-					Name:       "finish",
-					EndRun:     true,
-					Policy:     durable.Idempotent,
-					URL:        "http://localhost/finish",
-					Parameters: json.RawMessage(`{"type":"object"}`),
-				},
-				{
-					Name:       "write",
-					Policy:     durable.Unsafe,
-					URL:        "http://localhost/write",
-					Parameters: json.RawMessage(`{"type":"object"}`),
-				},
+	_, r := submitChatFixture(t, s, "owner", "finish-test", durable.AgentConfig{
+		Model:    durable.ModelSpec{Name: "test", BaseURL: "http://localhost/v1"},
+		MaxTurns: 5,
+		Tools: []durable.ToolSpec{
+			{
+				Name:       "finish",
+				EndRun:     true,
+				Policy:     durable.Idempotent,
+				URL:        "http://localhost/finish",
+				Parameters: json.RawMessage(`{"type":"object"}`),
+			},
+			{
+				Name:       "write",
+				Policy:     durable.Unsafe,
+				URL:        "http://localhost/write",
+				Parameters: json.RawMessage(`{"type":"object"}`),
 			},
 		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.PublishAgent(ctx, "owner", a.ID, a.Revision); err != nil {
-		t.Fatal(err)
-	}
-	session, err := s.CreateSession(ctx, "owner", a.ID, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, _, err := s.Submit(ctx, "owner", session.ID, durable.NewID(), "finish", time.Minute, 3)
-	if err != nil {
-		t.Fatal(err)
-	}
+	}, "finish", time.Minute, 3)
 	calls, finishes, writes := 0, 0, 0
 	e := engine.Engine{
 		Store: s,
-		Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+		Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 			llm := &fakeModel{
 				generate: func(_ context.Context, in []*schema.Message) (*schema.Message, error) {
 					calls++
@@ -122,7 +103,7 @@ func TestFinishValidationFeedbackReturnsToModel(t *testing.T) {
 	calls, finishes := 0, 0
 	e := &engine.Engine{
 		Store: s,
-		Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+		Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 			return &fakeModel{
 				generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
 					calls++

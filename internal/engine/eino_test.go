@@ -43,7 +43,7 @@ func TestEinoCheckpointPrecedesToolAndUncertainOutcomeNeedsReview(t *testing.T) 
 	interrupted, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var toolCalls, modelCalls int
-	build := func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+	build := func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 		return &fakeModel{generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
 			modelCalls++
 			if msgs[len(msgs)-1].Role == schema.Tool {
@@ -120,7 +120,7 @@ func TestEinoSerialToolsStopAtReviewAndResumeRemainingCalls(t *testing.T) {
 	r := submit(t, s, "submit", durable.Unsafe)
 	var inputs []string
 	var modelCalls int
-	build := func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+	build := func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 		return &fakeModel{generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
 			modelCalls++
 			if msgs[len(msgs)-1].Role == schema.Tool {
@@ -188,7 +188,7 @@ func TestEinoIterationLimitSurvivesAutomaticCheckpoints(t *testing.T) {
 	var calls int
 	e := &engine.Engine{
 		Store: s,
-		Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+		Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 			return &fakeModel{generate: func(context.Context, []*schema.Message) (*schema.Message, error) {
 				calls++
 				return toolReply("read"), nil
@@ -216,7 +216,7 @@ func TestEinoPreservesLiteralPromptAndHistory(t *testing.T) {
 	}
 	e := &engine.Engine{
 		Store: s,
-		Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+		Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 			return &fakeModel{
 				generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
 					if len(msgs) != 4 || msgs[0].Content != claimed.Spec.SystemPrompt ||
@@ -257,7 +257,7 @@ func TestEinoDoesNotRestartLegacyExecution(t *testing.T) {
 			claimed.State = json.RawMessage(tc.state)
 			e := &engine.Engine{
 				Store: s,
-				Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+				Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 					t.Fatal("legacy state must not start a new agent")
 					return nil, nil, nil
 				},

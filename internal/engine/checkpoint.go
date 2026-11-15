@@ -14,23 +14,26 @@ import (
 // opaque Eino checkpoint; these fields track only execution budgets, waiting
 // state and the durable terminal-tool result.
 type State struct {
-	Version            int     `json:"version"`
-	Checkpoint         []byte  `json:"checkpoint,omitempty"`
-	Turn               int     `json:"turn"`
-	ReturnDirectlyStep string  `json:"returnDirectlyStep,omitempty"`
-	Final              *string `json:"final,omitempty"`
+	Version            int      `json:"version"`
+	Checkpoint         []byte   `json:"checkpoint,omitempty"`
+	Turn               int      `json:"turn"`
+	ReturnDirectlyStep string   `json:"returnDirectlyStep,omitempty"`
+	Final              *string  `json:"final,omitempty"`
+	Steers             []string `json:"steers,omitempty"`
 }
 
 type execution struct {
 	adk.BaseChatModelAgentMiddleware
-	store     *durable.Store
-	run       *durable.Run
-	state     State
-	bindings  map[string]Binding
-	decision  *durable.Message
-	pending   *durable.Boundary
-	retry     bool
-	toolError error
+	store              *durable.Store
+	run                *durable.Run
+	state              State
+	bindings           map[string]Binding
+	decision           *durable.Message
+	pending            *durable.Boundary
+	retry              bool
+	toolError          error
+	summarizer         Summarizer
+	compactionMaxBytes int
 }
 
 func (s *execution) encode() json.RawMessage {

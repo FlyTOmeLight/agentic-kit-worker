@@ -26,12 +26,40 @@ type Binding struct {
 	Policy         durable.Policy
 }
 
-// Build resolves only the immutable configuration accepted for this run.
-type Build func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]Binding, error)
+// Build resolves only the immutable configuration accepted for this run. The
+// store is passed so an environment backend can record its durable intent
+// under the caller's claim before touching the network.
+type Build func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]Binding, error)
+
+// RunContext is the caller's claim on the run, handed to Build so an
+// environment backend can bind its lifecycle to the same lease.
+type RunContext struct {
+	RunID    string
+	WorkerID string
+	Epoch    int64
+	OwnerID  string
+	TenantID string
+	GoalID   string
+}
+
+type runContextKey struct{}
+
+// WithRunContext attaches the claim to the build context.
+func WithRunContext(ctx context.Context, rc RunContext) context.Context {
+	return context.WithValue(ctx, runContextKey{}, rc)
+}
+
+// BuildRunContext returns the claim attached by Execute, if any.
+func BuildRunContext(ctx context.Context) (RunContext, bool) {
+	v, ok := ctx.Value(runContextKey{}).(RunContext)
+	return v, ok
+}
 
 type Engine struct {
-	Store *durable.Store
-	Build Build
+	Store              *durable.Store
+	Build              Build
+	Summarizer         Summarizer
+	CompactionMaxBytes int
 }
 
 type operationKey struct{}
@@ -55,8 +83,35 @@ func OperationID(ctx context.Context) string {
 }
 
 func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
+	return e.execute(ctx, run, nil)
+}
+
+func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease func() bool) error {
+	var bindings map[string]Binding
+	defer func() {
+		release := beforeRelease == nil
+		defer func() { finishEnvironments(context.WithoutCancel(ctx), bindings, release) }()
+		if beforeRelease != nil {
+			release = beforeRelease()
+		}
+	}()
 	ctx = context.WithValue(ctx, executionKey{}, Execution{RunID: run.ID, Epoch: run.Epoch})
-	s := &execution{store: e.Store, run: run}
+	tenantID := ""
+	if run.Scope != nil {
+		tenantID = run.Scope.TenantID
+	}
+	ctx = WithRunContext(ctx, RunContext{
+		RunID:    run.ID,
+		WorkerID: run.WorkerID,
+		Epoch:    run.Epoch,
+		OwnerID:  run.OwnerID,
+		TenantID: tenantID,
+		GoalID:   run.GoalID,
+	})
+	s := &execution{
+		store: e.Store, run: run,
+		summarizer: e.Summarizer, compactionMaxBytes: e.CompactionMaxBytes,
+	}
 	if err := json.Unmarshal(run.State, &s.state); err != nil {
 		return err
 	}
@@ -68,7 +123,7 @@ func (e *Engine) Execute(ctx context.Context, run *durable.Run) error {
 		})
 	}
 	s.state.Version = 3
-	llm, bindings, err := e.Build(ctx, run.Spec)
+	llm, bindings, err := e.Build(ctx, e.Store, run.Spec)
 	if err != nil {
 		return s.fail(ctx, err)
 	}

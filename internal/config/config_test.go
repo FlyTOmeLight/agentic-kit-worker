@@ -39,13 +39,15 @@ func TestFrameworkConfig(t *testing.T) {
 	t.Setenv("WORKER_CONCURRENCY", "6")
 	t.Setenv("WORKER_LEASE", "900ms")
 	t.Setenv("WORKER_POLL", "20ms")
+	t.Setenv("COMPACTION_MAX_INPUT_BYTES", "32768")
 	path := filepath.Join("..", "..", "conf", "server", "config.toml")
 	cfg, err := decodeConfig(t, path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.DB.DSN != "postgres://localhost/db" || cfg.HTTPServer.Listen != "127.0.0.1:9101" ||
-		cfg.Worker.Concurrency != 6 || cfg.Worker.Lease != 900*time.Millisecond || cfg.Worker.Poll != 20*time.Millisecond {
+		cfg.Worker.Concurrency != 6 || cfg.Worker.Lease != 900*time.Millisecond || cfg.Worker.Poll != 20*time.Millisecond ||
+		cfg.Compaction.MaxInputBytes != 32768 {
 		t.Fatalf("configuration not decoded: %+v", cfg)
 	}
 	if cfg.DB.MaxOpenConns != 20 || cfg.DB.MaxIdleConns != 5 || cfg.DB.AutoMigrate {
@@ -101,6 +103,8 @@ AutoMigrate = false
 Concurrency = 4
 Lease = "30s"
 Poll = "1s"
+[Compaction]
+MaxInputBytes = 65536
 `
 	for _, tc := range []struct {
 		name, old, value, want string
@@ -114,6 +118,7 @@ Poll = "1s"
 		{name: "short lease", old: `Lease = "30s"`, value: `Lease = "1ms"`, want: "Worker.Lease"},
 		{name: "invalid duration", old: `Lease = "30s"`, value: `Lease = "bad"`, want: "Lease"},
 		{name: "zero poll", old: `Poll = "1s"`, value: `Poll = "0s"`, want: "Worker.Poll"},
+		{name: "negative compaction threshold", old: "MaxInputBytes = 65536", value: "MaxInputBytes = -1", want: "Compaction.MaxInputBytes"},
 		{name: "invalid listen", old: `Listen = "127.0.0.1:0"`, value: `Listen = "bad"`, want: "HTTPServer.Listen"},
 		{name: "invalid port", old: `Listen = "127.0.0.1:0"`, value: `Listen = "127.0.0.1:65536"`, want: "HTTPServer.Listen"},
 		{name: "invalid run mode", old: `RunMode = "test"`, value: `RunMode = "invalid"`, want: "RunMode"},

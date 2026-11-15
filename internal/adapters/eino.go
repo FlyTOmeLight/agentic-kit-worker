@@ -12,41 +12,40 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/filesystem"
 	fsTools "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 	"github.com/eino-contrib/jsonschema"
 
+	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	aioBackend "github.com/FlyTOmeLight/agentic-kit-worker/internal/adapters/aio"
+	sandboxBackend "github.com/FlyTOmeLight/agentic-kit-worker/internal/adapters/sandbox"
 	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
 // Build uses the same Eino model/tool interfaces as agentic-kit. OpenAI-compatible private model endpoints are supported.
-func Build(ctx context.Context, spec durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
-	key := os.Getenv(spec.Model.APIKeyEnv)
-	if spec.Model.APIKeyEnv != "" && key == "" {
-		return nil, nil, errors.New("model credential environment variable is not configured")
-	}
-	llm, err := openai.NewChatModel(
-		ctx,
-		&openai.ChatModelConfig{
-			BaseURL:     spec.Model.BaseURL,
-			APIKey:      key,
-			Model:       spec.Model.Name,
-			Timeout:     2 * time.Minute,
-			Temperature: spec.Model.Temperature,
-			TopP:        spec.Model.TopP,
-			MaxTokens:   spec.Model.MaxTokens,
-		},
-	)
+func Build(
+	ctx context.Context,
+	store *durable.Store,
+	spec durable.Spec,
+) (llm model.ToolCallingChatModel, bindings map[string]engine.Binding, err error) {
+	var environment *sandboxBackend.Backend
+	defer func() {
+		if err != nil && environment != nil {
+			closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			err = errors.Join(err, environment.Close(closeCtx))
+		}
+	}()
+	llm, err = buildModel(ctx, spec.Model)
 	if err != nil {
 		return nil, nil, err
 	}
-	bindings := make(map[string]engine.Binding, len(spec.Tools))
+	bindings = make(map[string]engine.Binding, len(spec.Tools))
 	for _, t := range spec.Tools {
 		if t.Kind != "" && t.Kind != "HTTP" {
 			return nil, nil, fmt.Errorf("unsupported tool kind %q for %s", t.Kind, t.Name)
@@ -70,25 +69,42 @@ func Build(ctx context.Context, spec durable.Spec) (model.ToolCallingChatModel, 
 		}
 	}
 	if len(spec.Toolsets) > 0 {
-		if spec.Filesystem == nil || spec.Filesystem.Provider != "AIO" {
-			return nil, nil, errors.New("bound AIO filesystem is required")
+		if spec.Filesystem == nil {
+			return nil, nil, errors.New("bound filesystem is required")
 		}
-		b, err := aioBackend.NewWithClient(
-			spec.Filesystem.URL,
-			os.Getenv(spec.Filesystem.TokenEnv),
-			spec.Filesystem.Workspace,
-			&http.Client{
-				Transport:     executionTransport{scope: spec.Scope},
-				CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
-			},
-		)
-		if err != nil {
-			return nil, nil, err
+		var backend interface {
+			filesystem.Backend
+			filesystem.Shell
 		}
-		if err = b.Ready(ctx); err != nil {
-			return nil, nil, err
+		switch spec.Filesystem.Provider {
+		case "AIO":
+			b, bErr := aioBackend.NewWithClient(
+				spec.Filesystem.URL,
+				os.Getenv(spec.Filesystem.TokenEnv),
+				spec.Filesystem.Workspace,
+				&http.Client{
+					Transport:     executionTransport{scope: spec.Scope},
+					CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+				},
+			)
+			if bErr != nil {
+				return nil, nil, bErr
+			}
+			if bErr = b.Ready(ctx); bErr != nil {
+				return nil, nil, bErr
+			}
+			backend = b
+		case "Sandbox":
+			b, bErr := buildSandboxBackend(ctx, store, spec)
+			if bErr != nil {
+				return nil, nil, bErr
+			}
+			backend = b
+		default:
+			return nil, nil, fmt.Errorf("unsupported filesystem provider %q", spec.Filesystem.Provider)
 		}
-		middleware, err := fsTools.New(ctx, &fsTools.MiddlewareConfig{Backend: b, Shell: b})
+		environment, _ = backend.(*sandboxBackend.Backend)
+		middleware, err := fsTools.New(ctx, &fsTools.MiddlewareConfig{Backend: backend, Shell: backend})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -108,7 +124,11 @@ func Build(ctx context.Context, spec durable.Spec) (model.ToolCallingChatModel, 
 			if info.Name == "write_file" || info.Name == "edit_file" || info.Name == "execute" {
 				policy = durable.Unsafe
 			}
-			bindings[info.Name] = engine.Binding{Tool: base.(tool.InvokableTool), Policy: policy}
+			invokable := base.(tool.InvokableTool)
+			if environment != nil {
+				invokable = &sandboxTool{InvokableTool: invokable, Backend: environment}
+			}
+			bindings[info.Name] = engine.Binding{Tool: invokable, Policy: policy}
 		}
 	}
 	for name, binding := range bindings {
@@ -123,6 +143,27 @@ func Build(ctx context.Context, spec durable.Spec) (model.ToolCallingChatModel, 
 		bindings[name] = binding
 	}
 	return llm, bindings, nil
+}
+
+func buildModel(ctx context.Context, spec durable.ModelSpec) (model.ToolCallingChatModel, error) {
+	key := os.Getenv(spec.APIKeyEnv)
+	if spec.APIKeyEnv != "" && key == "" {
+		return nil, errors.New("model credential environment variable is not configured")
+	}
+	return openai.NewChatModel(ctx, &openai.ChatModelConfig{
+		BaseURL:     spec.BaseURL,
+		APIKey:      key,
+		Model:       spec.Name,
+		Timeout:     2 * time.Minute,
+		Temperature: spec.Temperature,
+		TopP:        spec.TopP,
+		MaxTokens:   spec.MaxTokens,
+	})
+}
+
+type sandboxTool struct {
+	tool.InvokableTool
+	*sandboxBackend.Backend
 }
 
 type httpTool struct {
@@ -227,4 +268,48 @@ func (t executionTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		copy.Header.Set("X-Agentic-Scope", string(raw))
 	}
 	return http.DefaultTransport.RoundTrip(copy)
+}
+
+// buildSandboxBackend resolves the sandbox-center environment for this run
+// under the caller's claim. The durable environment intent is recorded before
+// any network call so a crash mid-acquire is reconciled, not leaked.
+func buildSandboxBackend(
+	ctx context.Context,
+	store *durable.Store,
+	spec durable.Spec,
+) (*sandboxBackend.Backend, error) {
+	rc, ok := engine.BuildRunContext(ctx)
+	if !ok {
+		return nil, errors.New("sandbox filesystem requires the worker run context")
+	}
+	if spec.Filesystem == nil {
+		return nil, errors.New("sandbox filesystem binding is required")
+	}
+	tenantID := ""
+	if spec.Scope != nil {
+		tenantID = spec.Scope.TenantID
+	}
+	backend, err := sandboxBackend.New(ctx, store, sandboxBackend.Config{
+		Endpoint:             spec.Filesystem.URL,
+		Token:                os.Getenv(spec.Filesystem.TokenEnv),
+		Workspace:            spec.Filesystem.Workspace,
+		ProfileID:            spec.Filesystem.ProfileID,
+		RequiredSave:         rc.GoalID != "" || spec.Filesystem.RestoreFromSandboxID != "",
+		RestoreFromSandboxID: spec.Filesystem.RestoreFromSandboxID,
+		TenantID:             tenantID,
+		OwnerID:              rc.OwnerID,
+		AcquireKey:           fmt.Sprintf("%s:env:%d", rc.RunID, rc.Epoch),
+		RunID:                rc.RunID,
+		WorkerID:             rc.WorkerID,
+		Epoch:                rc.Epoch,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err = backend.Ready(ctx); err != nil {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		return nil, errors.Join(err, backend.Close(closeCtx))
+	}
+	return backend, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"sync/atomic"
@@ -107,38 +108,18 @@ func toolReply(name string) *schema.Message {
 
 func submit(t *testing.T, s *durable.Store, name string, policy durable.Policy) *durable.Run {
 	t.Helper()
-	ctx := context.Background()
-	a, err := s.CreateAgent(
-		ctx,
-		"owner",
-		"test",
-		durable.AgentConfig{
-			Model:    durable.ModelSpec{Name: "test", BaseURL: "http://localhost:11434/v1"},
-			MaxTurns: 5,
-			Tools: []durable.ToolSpec{
-				{
-					Name:       name,
-					Policy:     policy,
-					URL:        "http://localhost/tool",
-					Parameters: json.RawMessage(`{"type":"object"}`),
-				},
+	_, r := submitChatFixture(t, s, "owner", "test", durable.AgentConfig{
+		Model:    durable.ModelSpec{Name: "test", BaseURL: "http://localhost:11434/v1"},
+		MaxTurns: 5,
+		Tools: []durable.ToolSpec{
+			{
+				Name:       name,
+				Policy:     policy,
+				URL:        "http://localhost/tool",
+				Parameters: json.RawMessage(`{"type":"object"}`),
 			},
 		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.PublishAgent(ctx, "owner", a.ID, a.Revision); err != nil {
-		t.Fatal(err)
-	}
-	session, err := s.CreateSession(ctx, "owner", a.ID, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, _, err := s.Submit(ctx, "owner", session.ID, durable.NewID(), "do work", time.Hour, 4)
-	if err != nil {
-		t.Fatal(err)
-	}
+	}, "do work", time.Hour, 4)
 	return r
 }
 
@@ -156,7 +137,7 @@ func TestClarificationSurvivesNewEngine(t *testing.T) {
 	ctx := context.Background()
 	r := submit(t, s, "ask_for_clarification", durable.ReadOnly)
 	var models atomic.Int32
-	build := func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+	build := func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 		return &fakeModel{generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
 			models.Add(1)
 			if msgs[len(msgs)-1].Role == schema.Tool {
@@ -202,7 +183,7 @@ func TestIdempotentToolRetriesKeepOperationID(t *testing.T) {
 	r := submit(t, s, "submit", durable.Idempotent)
 	var keys []string
 	var modelCalls int
-	build := func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+	build := func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 		return &fakeModel{generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
 			modelCalls++
 			if msgs[len(msgs)-1].Role == schema.Tool {
@@ -255,7 +236,7 @@ func TestUnsafeErrorPausesInsteadOfRetrying(t *testing.T) {
 	r := submit(t, s, "submit", durable.Unsafe)
 	e := &engine.Engine{
 		Store: s,
-		Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+		Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 			return &fakeModel{
 				generate: func(context.Context, []*schema.Message) (*schema.Message, error) { return toolReply("submit"), nil },
 			}, map[string]engine.Binding{
@@ -281,5 +262,189 @@ func TestUnsafeErrorPausesInsteadOfRetrying(t *testing.T) {
 	}
 	if got.WaitingStep == "" || got.WaitingKind != durable.InteractionReview {
 		t.Fatalf("no step available for reconciliation: %+v", got)
+	}
+}
+
+// closingTool implements the environmentBackend release contract so the
+// engine closes it when the run ends.
+type closingTool struct {
+	fakeTool
+	released bool
+	closed   int
+}
+
+func (t *closingTool) Released() bool { return t.released }
+
+func (t *closingTool) Detach() {}
+
+func (t *closingTool) Close(context.Context) error {
+	t.closed++
+	t.released = true
+	return nil
+}
+
+func TestEngineReleasesEnvironmentBackendOnFinish(t *testing.T) {
+	s, _ := testDB(t)
+	ctx := context.Background()
+	submit(t, s, "submit", durable.Idempotent)
+	env := &closingTool{fakeTool: fakeTool{name: "submit", invoke: func(context.Context, string) (string, error) {
+		return "receipt", nil
+	}}}
+	build := func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+		return &fakeModel{generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
+			if msgs[len(msgs)-1].Role == schema.Tool {
+				return schema.AssistantMessage("done", nil), nil
+			}
+			return toolReply("submit"), nil
+		}}, map[string]engine.Binding{"submit": {Policy: durable.Idempotent, Tool: env}}, nil
+	}
+	e := &engine.Engine{Store: s, Build: build}
+	if err := e.Execute(ctx, getClaim(t, s)); err != nil {
+		t.Fatal(err)
+	}
+	if env.closed != 1 {
+		t.Fatalf("environment backend must be closed once on finish, got %d", env.closed)
+	}
+}
+
+func TestSteeringInjectedIntoNextModelTurn(t *testing.T) {
+	s, _ := testDB(t)
+	ctx := context.Background()
+	r := submit(t, s, "lookup", durable.ReadOnly)
+	goal, _, err := s.CreateGoal(ctx, durable.Goal{
+		OwnerID:     "owner",
+		SessionID:   r.SessionID,
+		RequestKey:  "steer-engine-key",
+		RequestHash: "steer-engine-hash",
+		Objective:   "complete lookup with steering",
+		Evaluator:   durable.EvaluatorSpec{Kind: durable.EvaluatorNone},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.BindGoalToRun(ctx, "owner", goal.ID, r.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var secondTurnLastUserMsg string
+	e := &engine.Engine{
+		Store: s,
+		Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+			return &fakeModel{
+				generate: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
+					for _, m := range msgs {
+						if m.Role == schema.Tool {
+							if last := msgs[len(msgs)-1]; last.Role == schema.User {
+								secondTurnLastUserMsg = last.Content
+							}
+							return schema.AssistantMessage("steered answer", nil), nil
+						}
+					}
+					return toolReply("lookup"), nil
+				},
+			}, map[string]engine.Binding{
+				"lookup": {
+					Policy: durable.ReadOnly,
+					Tool: &fakeTool{
+						name: "lookup",
+						invoke: func(ctx context.Context, _ string) (string, error) {
+							// While the tool is running in turn 1, queue a steering instruction for turn 2.
+							if err := s.SteerGoal(
+								ctx,
+								"owner",
+								goal.ID,
+								"prefer cached index",
+							); err != nil {
+								return "", err
+							}
+							return "lookup-ok", nil
+						},
+					},
+				},
+			}, nil
+		},
+	}
+	if err := e.Execute(ctx, getClaim(t, s)); err != nil {
+		t.Fatal(err)
+	}
+	if secondTurnLastUserMsg != "prefer cached index" {
+		t.Fatalf("expected steering message on turn 2, got %q", secondTurnLastUserMsg)
+	}
+	done, err := s.Get(ctx, "owner", r.ID)
+	if err != nil || done.Status != durable.Completed || done.Output != "steered answer" {
+		t.Fatalf("unexpected run state: %+v %v", done, err)
+	}
+}
+
+func TestSteeringSurvivesWorkerTakeover(t *testing.T) {
+	store, dsn := testDB(t)
+	ctx := context.Background()
+	run := submit(t, store, "lookup", durable.ReadOnly)
+	goal, _, err := store.CreateGoal(ctx, durable.Goal{
+		OwnerID: "owner", SessionID: run.SessionID, RequestKey: "steer-recovery",
+		RequestHash: "steer-recovery", Objective: "recover steering",
+		Evaluator: durable.EvaluatorSpec{Kind: durable.EvaluatorNone},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.BindGoalToRun(ctx, "owner", goal.ID, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	claimed := getClaim(t, store)
+	if err = store.SteerGoal(ctx, "owner", goal.ID, "keep the public API"); err != nil {
+		t.Fatal(err)
+	}
+	attemptCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var calls int
+	build := func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+		return &fakeModel{
+			generate: func(_ context.Context, messages []*schema.Message) (*schema.Message, error) {
+				calls++
+				var count int
+				for _, message := range messages {
+					if message.Role == schema.User && message.Content == "keep the public API" {
+						count++
+					}
+				}
+				if count != 1 {
+					return nil, fmt.Errorf("attempt %d: steering count = %d", calls, count)
+				}
+				if calls == 1 {
+					cancel()
+					return nil, context.Canceled
+				}
+				return schema.AssistantMessage("recovered", nil), nil
+			},
+		}, map[string]engine.Binding{
+			"lookup": {Policy: durable.ReadOnly, Tool: &fakeTool{name: "lookup"}},
+		}, nil
+	}
+	first := &engine.Engine{Store: store, Build: build}
+	if err = first.Execute(attemptCtx, claimed); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first attempt: %v", err)
+	}
+	if err = store.DB().Exec(
+		"UPDATE durable_run SET lease_until = clock_timestamp() - interval '1 second' WHERE id = ?", run.ID,
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := durable.Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	replacement, err := reopened.Claim(ctx, "replacement-worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := &engine.Engine{Store: reopened, Build: build}
+	if err = second.Execute(ctx, replacement); err != nil {
+		t.Fatal(err)
+	}
+	done, err := reopened.Get(ctx, "owner", run.ID)
+	if err != nil || done.Status != durable.Completed || done.Output != "recovered" || calls != 2 {
+		t.Fatalf("recovery: run=%+v calls=%d err=%v", done, calls, err)
 	}
 }

@@ -214,6 +214,7 @@ func buildAPI(t *testing.T) string {
 
 func startAPI(t *testing.T, binary, dsn string) string {
 	t.Helper()
+	artifactURL := newFakeArtifactServer(t).URL
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -227,7 +228,11 @@ func startAPI(t *testing.T, binary, dsn string) string {
 AppCode = 100
 RunMode = "release"
 [FakeAuth]
+TenantID = "test-tenant"
 UserID = "owner"
+[Artifact]
+Endpoint = %q
+Timeout = 5000
 [DB]
 Driver = "PostgreSQL"
 DSN = %q
@@ -243,7 +248,7 @@ IdleTimeout = 60000
 [Redis]
 Addrs = ["127.0.0.1:1"]
 DB = 0
-`, dsn, address)
+`, artifactURL, dsn, address)
 	if err := os.WriteFile(configPath, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}

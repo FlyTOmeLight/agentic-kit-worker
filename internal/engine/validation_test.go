@@ -31,7 +31,7 @@ func TestInvalidArgumentsReturnToModelWithoutMutation(t *testing.T) {
 	modelCalls, mutations := 0, 0
 	e := engine.Engine{
 		Store: s,
-		Build: func(context.Context, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+		Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 			llm := &fakeModel{
 				generate: func(_ context.Context, in []*schema.Message) (*schema.Message, error) {
 					modelCalls++
