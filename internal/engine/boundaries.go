@@ -42,12 +42,15 @@ func (m *boundaryModel) Generate(
 	if s.state.Turn >= s.run.Spec.MaxTurns {
 		return nil, fmt.Errorf("model turn limit exceeded: %d", s.run.Spec.MaxTurns)
 	}
-	_, err := s.store.TakePendingSteer(ctx, s.run.Lease(), func(steer string) json.RawMessage {
-		s.state.Steers = append(s.state.Steers, steer)
-		return s.encode()
-	})
-	if err != nil {
-		return nil, err
+	var err error
+	if s.store != nil {
+		_, err = s.store.TakePendingSteer(ctx, s.run.Lease(), func(steer string) json.RawMessage {
+			s.state.Steers = append(s.state.Steers, steer)
+			return s.encode()
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	if (s.summarizer != nil && s.compactionMaxBytes > 0) || s.run.CompactedSummary != "" {
 		input, err = s.projectContext(ctx, input)
@@ -55,12 +58,18 @@ func (m *boundaryModel) Generate(
 			return nil, err
 		}
 	}
+	options := model.GetCommonOptions(&model.Options{}, opts...)
+	input, contextInfo, err := s.buildContext(input, options.Tools)
+	if err != nil {
+		return nil, err
+	}
 	for _, item := range s.state.Steers {
 		input = append(input, schema.UserMessage(item))
 	}
 	if err := s.store.CommitBoundary(ctx, s.run.Lease(), durable.Boundary{
-		Kind:  durable.BoundaryModelStarted,
-		State: s.encode(),
+		Kind:    durable.BoundaryModelStarted,
+		State:   s.encode(),
+		Context: contextInfo,
 	}); err != nil {
 		return nil, err
 	}

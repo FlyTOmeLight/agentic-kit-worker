@@ -112,6 +112,11 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 		store: e.Store, run: run,
 		summarizer: e.Summarizer, compactionMaxBytes: e.CompactionMaxBytes,
 	}
+	snapshot, err := decodeSnapshot(run)
+	if err != nil {
+		return s.fail(ctx, err)
+	}
+	s.snapshot = snapshot
 	if err := json.Unmarshal(run.State, &s.state); err != nil {
 		return err
 	}
@@ -172,6 +177,9 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 		MaxIterations: maxIterations,
 		// Published prompts are literal text, not templates.
 		GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
+			if s.snapshot != nil {
+				return input.Messages, nil
+			}
 			return append([]*schema.Message{schema.SystemMessage(instruction)}, input.Messages...), nil
 		},
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
@@ -210,13 +218,17 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 		iter, err = runner.Resume(ctx, run.ID)
 	} else {
 		var messages []*schema.Message
-		for _, msg := range run.Spec.History {
-			messages = append(
-				messages,
-				&schema.Message{Role: schema.RoleType(msg.Role), Content: msg.Content},
-			)
+		if s.snapshot != nil {
+			messages = []*schema.Message{schema.UserMessage(run.Spec.Query)}
+		} else {
+			for _, msg := range run.Spec.History {
+				messages = append(
+					messages,
+					&schema.Message{Role: schema.RoleType(msg.Role), Content: msg.Content},
+				)
+			}
+			messages = append(messages, schema.UserMessage(run.Spec.Query))
 		}
-		messages = append(messages, schema.UserMessage(run.Spec.Query))
 		iter = runner.Run(ctx, messages, adk.WithCheckPointID(run.ID))
 	}
 	// Eino owns the ReAct loop. This loop consumes events and resumes automatic

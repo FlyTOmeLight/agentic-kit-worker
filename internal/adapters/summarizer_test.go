@@ -47,7 +47,8 @@ func TestSummarizerUsesIndependentModelWithoutTools(t *testing.T) {
 						t.Error(err)
 					}
 					if body.Model != "frozen-model" || len(body.Tools) != 0 || len(body.ToolChoice) != 0 ||
-						body.MaxTokens != 2048 || len(body.Messages) != 2 ||
+						body.MaxTokens != 2048 ||
+						len(body.Messages) != 2 ||
 						body.Messages[0].Role != "system" {
 						t.Errorf("unexpected summary request: %+v", body)
 					}

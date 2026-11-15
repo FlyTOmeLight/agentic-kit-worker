@@ -7,6 +7,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 
+	"github.com/FlyTOmeLight/agentic-kit-api/pkg/contextbuilder"
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 )
 
@@ -34,6 +35,7 @@ type execution struct {
 	toolError          error
 	summarizer         Summarizer
 	compactionMaxBytes int
+	snapshot           *contextbuilder.Snapshot
 }
 
 func (s *execution) encode() json.RawMessage {
