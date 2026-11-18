@@ -1,0 +1,50 @@
+name: Integration
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOWORK: 'off'
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_USER: agentic
+          POSTGRES_PASSWORD: agentic_test
+          POSTGRES_DB: agentic
+        ports:
+          - '5432:5432'
+        options: >-
+          --health-cmd "pg_isready -U agentic -d agentic"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Prebuild process test binaries
+        run: |
+          go build -o "$RUNNER_TEMP/agentic-kit-worker" ./cmd/worker
+          go mod download github.com/FlyTOmeLight/agentic-kit-api
+          api_dir=$(go list -m -f '{{.Dir}}' github.com/FlyTOmeLight/agentic-kit-api)
+          cd "$api_dir"
+          go build -o "$RUNNER_TEMP/agentic-kit-api" ./cmd/server
+      - name: Test and vet
+        env:
+          TEST_DATABASE_URL: 'postgres://agentic:agentic_test@127.0.0.1:5432/agentic?sslmode=disable'
+        run: make integration
