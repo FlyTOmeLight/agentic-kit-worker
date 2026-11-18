@@ -177,20 +177,25 @@ func TestWorkerEvaluatesGoalBeforeSandboxRelease(t *testing.T) {
 							return
 						}
 						current, err := store.Get(request.Context(), "owner", run.ID)
-						if err != nil || current.Status != durable.Completed ||
-							current.WorkerID != "" ||
-							current.LeaseUntil != nil {
+						if err != nil {
+							t.Errorf("renewal could not read run: err=%v", err)
+							writer.WriteHeader(http.StatusInternalServerError)
+							return
+						}
+						if current.Status == durable.Completed &&
+							(current.WorkerID != "" || current.LeaseUntil != nil) {
 							t.Errorf(
-								"renewal must continue after run claim cleared: run=%+v err=%v",
+								"completed run retained its claim during renewal: run=%+v",
 								current,
-								err,
 							)
 						}
 						json.NewEncoder(writer).Encode(sdk.SandboxLease{
 							ID: "lease-eval", Revision: input.Revision, Status: "Active",
 							HardExpiresAt: time.Now().Add(time.Second),
 						})
-						if time.Now().UnixNano() > initialExpiry.Load() {
+						if current.Status == durable.Completed && current.WorkerID == "" &&
+							current.LeaseUntil == nil &&
+							time.Now().After(time.Unix(0, initialExpiry.Load())) {
 							select {
 							case renewed <- struct{}{}:
 							default:
