@@ -324,6 +324,128 @@ func TestInflightSummaryBlocksReplacement(t *testing.T) {
 	}
 }
 
+func TestBilledSummaryPersistsAfterParentCancel(t *testing.T) {
+	store, dsn := testDB(t)
+	ctx := context.Background()
+	run := submit(t, store, "lookup", durable.ReadOnly)
+	claimed, err := store.Claim(ctx, "first", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	modelCalls, toolCalls, summaries := 0, 0, 0
+	build := func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+		return &fakeModel{
+			generate: func(_ context.Context, input []*schema.Message) (*schema.Message, error) {
+				modelCalls++
+				if err := checkToolPairs(input); err != nil {
+					return nil, err
+				}
+				if modelCalls <= 3 {
+					return toolReply("lookup"), nil
+				}
+				for _, message := range input {
+					if message.ToolCallID == "turn_1_tool_0" {
+						return nil, errors.New(
+							"compacted tool result leaked into replacement input",
+						)
+					}
+				}
+				if len(input) == 0 || !strings.Contains(input[0].Content, "saved summary") {
+					return nil, fmt.Errorf("replacement input lost summary: %+v", input)
+				}
+				return schema.AssistantMessage("done after takeover", nil), nil
+			},
+		}, map[string]engine.Binding{"lookup": {
+			Policy: durable.ReadOnly,
+			Tool: &fakeTool{name: "lookup", invoke: func(context.Context, string) (string, error) {
+				toolCalls++
+				return "tool result", nil
+			}},
+		}}, nil
+	}
+	first := &engine.Engine{
+		Store: store,
+		Build: build,
+		Summarizer: summaryFunc(func(summaryCtx context.Context, input engine.SummaryInput) (string, error) {
+			summaries++
+			if err := input.RecordUsage(
+				summaryCtx,
+				&schema.TokenUsage{PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6},
+				6,
+			); err != nil {
+				return "", err
+			}
+			cancel()
+			return "saved summary", nil
+		}),
+		CompactionMaxBytes: 1,
+	}
+	if err = first.Execute(attemptCtx, claimed); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first attempt: %v", err)
+	}
+	saved, err := store.Get(ctx, "owner", run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var savedState engine.State
+	if err = json.Unmarshal(saved.State, &savedState); err != nil {
+		t.Fatal(err)
+	}
+	if saved.CompactedSummary != "saved summary" || saved.FirstKeptSeq == 0 ||
+		savedState.InflightModel != nil || savedState.SummaryCalls != 1 {
+		t.Fatalf("summary was not durable after billing: run=%+v state=%+v", saved, savedState)
+	}
+	if err = store.DB().Exec(
+		"UPDATE durable_run SET lease_until = clock_timestamp() - interval '1 second' WHERE id = ?", run.ID,
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := durable.Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	replacement, err := reopened.Claim(ctx, "replacement-worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := &engine.Engine{
+		Store: reopened,
+		Build: build,
+		Summarizer: summaryFunc(func(context.Context, engine.SummaryInput) (string, error) {
+			summaries++
+			return "unexpected second summary", nil
+		}),
+		CompactionMaxBytes: 1,
+	}
+	if err = second.Execute(ctx, replacement); err != nil {
+		t.Fatal(err)
+	}
+	done, err := reopened.Get(ctx, "owner", run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summaryUsage int64
+	if err = reopened.DB().Table("durable_usage").
+		Where("run_id = ? AND call = ?", run.ID, "summary").
+		Count(&summaryUsage).Error; err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != durable.Completed || done.Output != "done after takeover" ||
+		summaries != 1 || summaryUsage != 1 || toolCalls != 3 || modelCalls != 4 {
+		t.Fatalf(
+			"done=%+v summaries=%d usage=%d tools=%d models=%d",
+			done,
+			summaries,
+			summaryUsage,
+			toolCalls,
+			modelCalls,
+		)
+	}
+}
+
 func TestCompactionFailureRetriesWithoutMovingBoundary(t *testing.T) {
 	store, _ := testDB(t)
 	ctx := context.Background()

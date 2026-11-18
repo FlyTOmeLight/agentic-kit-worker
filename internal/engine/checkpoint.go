@@ -90,8 +90,11 @@ func (s *execution) Set(ctx context.Context, id string, checkpoint []byte) error
 	}
 	s.state.Checkpoint = checkpoint
 	if s.decision != nil {
+		decision := *s.decision
+		pending := s.state.PendingModel
 		s.state.PendingModel = nil
-		if err := s.store.RecordDecision(ctx, s.run.Lease(), s.encode(), *s.decision); err != nil {
+		if err := s.store.RecordDecision(ctx, s.run.Lease(), s.encode(), decision); err != nil {
+			s.state.PendingModel = pending
 			return err
 		}
 		s.decision = nil
