@@ -32,12 +32,12 @@ func Build(ctx context.Context, runtime *app.Runtime, cfg *config.Config) error 
 	if err != nil {
 		return err
 	}
+	executionEngine, err := newEngine(cfg, store)
+	if err != nil {
+		return err
+	}
 	worker := &engine.Worker{
-		Engine: &engine.Engine{
-			Store: store, Build: adapters.Build,
-			Summarizer:         adapters.Summarizer{},
-			CompactionMaxBytes: cfg.Compaction.MaxInputBytes,
-		},
+		Engine:      executionEngine,
 		Log:         runtime.Log,
 		ID:          durable.NewID(),
 		Concurrency: cfg.Worker.Concurrency,
@@ -69,4 +69,16 @@ func Build(ctx context.Context, runtime *app.Runtime, cfg *config.Config) error 
 		return err
 	}
 	return runtime.AddService(New(worker))
+}
+
+func newEngine(cfg *config.Config, store *durable.Store) (*engine.Engine, error) {
+	if err := cfg.Pricing.Validate(); err != nil {
+		return nil, err
+	}
+	return &engine.Engine{
+		Store:              store,
+		Build:              adapters.Build,
+		Summarizer:         adapters.Summarizer{},
+		CompactionMaxBytes: cfg.Compaction.MaxInputBytes,
+	}, nil
 }

@@ -7,19 +7,32 @@ import (
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/contextbuilder"
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
+	executionpkg "github.com/FlyTOmeLight/agentic-kit-api/pkg/execution"
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/schema"
 )
 
 // State is a storage envelope. Agent messages and the ReAct loop belong to the
 // opaque Eino checkpoint; these fields track only execution budgets, waiting
 // state and the durable terminal-tool result.
+
+// InflightModel records that a model or summary request has been dispatched
+// but its usage has not been durably recorded. A replacement worker finding
+// this marker must block the run instead of re-dispatching, because the
+// original call may have consumed tokens whose cost is unknown.
+type InflightModel = executionpkg.InflightModelDispatch
+
 type State struct {
-	Version            int      `json:"version"`
-	Checkpoint         []byte   `json:"checkpoint,omitempty"`
-	Turn               int      `json:"turn"`
-	ReturnDirectlyStep string   `json:"returnDirectlyStep,omitempty"`
-	Final              *string  `json:"final,omitempty"`
-	Steers             []string `json:"steers,omitempty"`
+	Version            int             `json:"version"`
+	Checkpoint         []byte          `json:"checkpoint,omitempty"`
+	Turn               int             `json:"turn"`
+	SummaryCalls       int64           `json:"summaryCalls,omitempty"`
+	InflightModel      *InflightModel  `json:"inflightModel,omitempty"`
+	PendingModel       *schema.Message `json:"pendingModel,omitempty"`
+	PricingFailure     string          `json:"pricingFailure,omitempty"`
+	ReturnDirectlyStep string          `json:"returnDirectlyStep,omitempty"`
+	Final              *string         `json:"final,omitempty"`
+	Steers             []string        `json:"steers,omitempty"`
 }
 
 type execution struct {
@@ -53,6 +66,17 @@ func (s *execution) fail(ctx context.Context, err error) error {
 	})
 }
 
+// block parks the run when the worker cannot safely continue. The durable
+// store releases the lease and blocks the associated goal so a human can
+// inspect the unknown side effects before deciding to retry.
+func (s *execution) block(ctx context.Context, detail string) error {
+	return s.store.CommitBoundary(ctx, s.run.Lease(), durable.Boundary{
+		Kind:   durable.BoundaryBlock,
+		State:  s.encode(),
+		Detail: detail,
+	})
+}
+
 func (s *execution) Get(_ context.Context, id string) ([]byte, bool, error) {
 	if id != s.run.ID {
 		return nil, false, errors.New("checkpoint run mismatch")
@@ -66,6 +90,7 @@ func (s *execution) Set(ctx context.Context, id string, checkpoint []byte) error
 	}
 	s.state.Checkpoint = checkpoint
 	if s.decision != nil {
+		s.state.PendingModel = nil
 		if err := s.store.RecordDecision(ctx, s.run.Lease(), s.encode(), *s.decision); err != nil {
 			return err
 		}

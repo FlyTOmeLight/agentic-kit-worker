@@ -17,8 +17,18 @@ type Config struct {
 	DB         db.Config
 	Worker     WorkerConfig
 	Evaluator  EvaluatorConfig
+	Pricing    PricingConfig
 	Compaction CompactionConfig
 	HTTPServer conf.HTTPServerConfig
+}
+
+type PricingConfig map[string]any
+
+func (c PricingConfig) Validate() error {
+	if c != nil {
+		return errors.New("worker Pricing configuration is no longer accepted; configure pricing on the API and use frozen Run snapshots")
+	}
+	return nil
 }
 
 type CompactionConfig struct {
@@ -69,6 +79,9 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Compaction.MaxInputBytes < 0 {
 		return errors.New("Compaction.MaxInputBytes must not be negative")
+	}
+	if err := cfg.Pricing.Validate(); err != nil {
+		return err
 	}
 	_, port, err := net.SplitHostPort(cfg.HTTPServer.Listen)
 	number, portErr := strconv.Atoi(port)

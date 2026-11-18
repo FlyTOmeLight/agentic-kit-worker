@@ -15,7 +15,7 @@ import (
 
 func TestModelBoundaryCountsActualToolDefinitionsBeforeCallingModel(t *testing.T) {
 	state := &execution{
-		run: &durable.Run{Spec: durable.Spec{Query: "question", MaxTurns: 2}},
+		run: &durable.Run{Spec: durable.Spec{Query: "question", MaxTurns: 2, PricingFrozen: true}},
 		snapshot: &contextbuilder.Snapshot{
 			Policy: contextbuilder.Policy{Version: contextbuilder.PolicyVersionV2},
 			Budget: contextbuilder.Budget{MaxInputBytes: 200},

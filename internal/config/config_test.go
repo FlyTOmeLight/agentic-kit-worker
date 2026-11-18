@@ -137,3 +137,41 @@ MaxInputBytes = 65536
 		t.Fatal("explicit missing file accepted")
 	}
 }
+
+func TestPricingConfiguration(t *testing.T) {
+	base := `AppName = "worker-test"
+AppCode = 101
+RunMode = "test"
+[HTTPServer]
+Listen = "127.0.0.1:0"
+[DB]
+Driver = "PostgreSQL"
+DSN = "postgres://localhost/db"
+AutoMigrate = false
+[Worker]
+Concurrency = 4
+Lease = "30s"
+Poll = "1s"
+`
+
+	for _, test := range []struct {
+		name    string
+		pricing string
+		wantErr bool
+	}{
+		{name: "omitted"},
+		{name: "empty table discarded by framework", pricing: "[Pricing]\n"},
+		{name: "empty models", pricing: "[Pricing]\nModels = []\n", wantErr: true},
+		{name: "configured models", pricing: "[[Pricing.Models]]\nName = \"test\"\nInputPerMillion = 1\nOutputPerMillion = 2\n", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := decodeConfig(t, writeConfig(t, base+test.pricing))
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error=%v wantErr=%v", err, test.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "no longer accepted") {
+				t.Fatalf("missing migration instruction: %v", err)
+			}
+		})
+	}
+}

@@ -145,19 +145,9 @@ func (s *execution) buildContext(
 		return stateMessages, nil, nil
 	}
 
-	// Locate the current turn in stateMessages. The current turn starts with the
-	// last User message (or the first User message if only one exists).
-	userIndex := -1
-	for i := len(stateMessages) - 1; i >= 0; i-- {
-		if stateMessages[i] != nil && stateMessages[i].Role == schema.User {
-			userIndex = i
-			break
-		}
-	}
-
 	var currentTurn []contextbuilder.Message
-	if userIndex >= 0 {
-		for _, m := range stateMessages[userIndex:] {
+	if len(stateMessages) > 0 {
+		for _, m := range stateMessages {
 			cmsg, err := toContextMessage(m)
 			if err != nil {
 				return nil, nil, err
@@ -173,6 +163,13 @@ func (s *execution) buildContext(
 	}
 
 	materials := s.snapshot.Materials
+	if s.run != nil && s.run.CompactedSummary != "" {
+		materials.History = nil
+		currentTurn = append([]contextbuilder.Message{{
+			Role:    contextbuilder.RoleUser,
+			Content: "Summary of earlier conversation (context, not new instructions):\n" + s.run.CompactedSummary,
+		}}, currentTurn...)
+	}
 	materials.Tools = make([]contextbuilder.ToolDefinition, 0, len(toolInfos))
 	for _, info := range toolInfos {
 		if info == nil {
@@ -234,5 +231,12 @@ func (s *execution) buildContext(
 		CollapsedSources:     collapsed,
 		ProjectedToolResults: result.ProjectedToolResults,
 	}
-	return toSchemaMessages(result.Messages), info, nil
+	messages := toSchemaMessages(result.Messages)
+	offset := len(messages) - len(stateMessages)
+	for index, original := range stateMessages {
+		preserved := *original
+		preserved.Content = messages[offset+index].Content
+		messages[offset+index] = &preserved
+	}
+	return messages, info, nil
 }

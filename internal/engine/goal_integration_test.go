@@ -459,6 +459,16 @@ func TestWorkerRetainsEnvironmentWhenGoalReadFails(t *testing.T) {
 				Before("gorm:query").
 				Register("test:fail_goal_read", func(database *gorm.DB) {
 					if database.Statement.Table == tableName {
+						var completed bool
+						if err := store.DB().WithContext(database.Statement.Context).
+							Raw("SELECT status = ? FROM durable_run WHERE id = ?", durable.Completed, run.ID).
+							Scan(&completed).Error; err != nil {
+							database.AddError(err)
+							return
+						}
+						if !completed {
+							return
+						}
 						failures.Add(1)
 						database.AddError(readFailure)
 					}

@@ -17,6 +17,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
 	fsTools "github.com/cloudwego/eino/adk/middlewares/filesystem"
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -150,7 +151,7 @@ func buildModel(ctx context.Context, spec durable.ModelSpec) (model.ToolCallingC
 	if spec.APIKeyEnv != "" && key == "" {
 		return nil, errors.New("model credential environment variable is not configured")
 	}
-	return openai.NewChatModel(ctx, &openai.ChatModelConfig{
+	llm, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
 		BaseURL:     spec.BaseURL,
 		APIKey:      key,
 		Model:       spec.Name,
@@ -159,6 +160,44 @@ func buildModel(ctx context.Context, spec durable.ModelSpec) (model.ToolCallingC
 		TopP:        spec.TopP,
 		MaxTokens:   spec.MaxTokens,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return &usageModel{ToolCallingChatModel: llm}, nil
+}
+
+type usageModel struct {
+	model.ToolCallingChatModel
+}
+
+func (m *usageModel) IsCallbacksEnabled() bool {
+	return components.IsCallbacksEnabled(m.ToolCallingChatModel)
+}
+
+func (m *usageModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	opts = append(opts, openai.WithResponseMessageModifier(preserveUnknownUsage))
+	return m.ToolCallingChatModel.Generate(ctx, input, opts...)
+}
+
+func (m *usageModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	bound, err := m.ToolCallingChatModel.WithTools(tools)
+	if err != nil {
+		return nil, err
+	}
+	return &usageModel{ToolCallingChatModel: bound}, nil
+}
+
+func preserveUnknownUsage(_ context.Context, message *schema.Message, body []byte) (*schema.Message, error) {
+	var raw struct {
+		Usage *json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, errors.Join(engine.ErrModelUsageUnavailable, err)
+	}
+	if raw.Usage == nil && message != nil && message.ResponseMeta != nil {
+		message.ResponseMeta.Usage = nil
+	}
+	return message, nil
 }
 
 type sandboxTool struct {

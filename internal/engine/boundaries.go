@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
@@ -36,14 +37,99 @@ func (m *boundaryModel) Generate(
 	opts ...model.Option,
 ) (*schema.Message, error) {
 	s := m.execution
+	if err := s.checkPricing(ctx); err != nil {
+		return nil, err
+	}
 	if s.state.Final != nil {
 		return schema.AssistantMessage(*s.state.Final, nil), nil
 	}
+	if s.state.PendingModel != nil {
+		return m.applyResponse(ctx, s.state.PendingModel)
+	}
+	input, err := m.prepare(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	msg, callErr := m.BaseChatModel.Generate(ctx, input, opts...)
+	return m.complete(ctx, msg, callErr)
+}
+
+func (m *boundaryModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	if err := m.execution.checkPricing(ctx); err != nil {
+		return nil, err
+	}
+	if m.execution.state.Final != nil {
+		return schema.StreamReaderFromArray([]*schema.Message{
+			schema.AssistantMessage(*m.execution.state.Final, nil),
+		}), nil
+	}
+	if m.execution.state.PendingModel != nil {
+		message, err := m.applyResponse(ctx, m.execution.state.PendingModel)
+		if err != nil {
+			return nil, err
+		}
+		return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+	}
+	input, err := m.prepare(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := m.BaseChatModel.Stream(ctx, input, opts...)
+	if err != nil {
+		m.execution.retry = true
+		return nil, err
+	}
+	if reader == nil {
+		return nil, errors.New("model returned no stream")
+	}
+	defer reader.Close()
+	var chunks []*schema.Message
+	var streamErr error
+	for {
+		chunk, receiveErr := reader.Recv()
+		if errors.Is(receiveErr, io.EOF) {
+			break
+		}
+		if receiveErr != nil {
+			streamErr = receiveErr
+			break
+		}
+		if chunk != nil {
+			chunks = append(chunks, chunk)
+		}
+	}
+	var message *schema.Message
+	if len(chunks) > 0 {
+		message, err = schema.ConcatMessages(chunks)
+		if err != nil {
+			return nil, err
+		}
+	}
+	message, err = m.complete(ctx, message, streamErr)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (m *boundaryModel) prepare(
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...model.Option,
+) ([]*schema.Message, error) {
+	s := m.execution
 	if s.state.Turn >= s.run.Spec.MaxTurns {
 		return nil, fmt.Errorf("model turn limit exceeded: %d", s.run.Spec.MaxTurns)
 	}
 	var err error
 	if s.store != nil {
+		if err = s.store.CheckUsageBudget(ctx, s.run.Lease()); err != nil {
+			return nil, err
+		}
 		_, err = s.store.TakePendingSteer(ctx, s.run.Lease(), func(steer string) json.RawMessage {
 			s.state.Steers = append(s.state.Steers, steer)
 			return s.encode()
@@ -66,27 +152,73 @@ func (m *boundaryModel) Generate(
 	for _, item := range s.state.Steers {
 		input = append(input, schema.UserMessage(item))
 	}
+	if err := s.store.CheckUsageBudget(ctx, s.run.Lease()); err != nil {
+		return nil, err
+	}
+	s.state.InflightModel = &InflightModel{Kind: "model", Sequence: int64(s.state.Turn)}
 	if err := s.store.CommitBoundary(ctx, s.run.Lease(), durable.Boundary{
 		Kind:    durable.BoundaryModelStarted,
 		State:   s.encode(),
 		Context: contextInfo,
 	}); err != nil {
+		s.state.InflightModel = nil
 		return nil, err
 	}
-	msg, err := m.BaseChatModel.Generate(ctx, input, opts...)
-	if err != nil {
-		s.retry = true
-		return nil, err
-	}
+	return input, nil
+}
+
+func (m *boundaryModel) complete(ctx context.Context, msg *schema.Message, callErr error) (*schema.Message, error) {
+	s := m.execution
 	if msg == nil {
+		if callErr != nil {
+			s.retry = true
+			return nil, callErr
+		}
 		return nil, errors.New("model returned no message")
 	}
+	if msg.ResponseMeta == nil || msg.ResponseMeta.Usage == nil {
+		return nil, errors.Join(ErrModelUsageUnavailable, callErr)
+	}
+	usage := msg.ResponseMeta.Usage
+	tokens := int64(usage.TotalTokens)
+	if tokens == 0 {
+		tokens = int64(usage.PromptTokens) + int64(usage.CompletionTokens)
+	}
+	cost, costErr := s.usageCost(usage)
+	previousState := s.state
+	if costErr != nil {
+		s.state.PricingFailure = costErr.Error()
+	}
+	callTurn := s.state.Turn
+	s.state.Turn++
+	s.state.ReturnDirectlyStep = ""
+	s.state.InflightModel = nil
+	if callErr == nil {
+		s.state.PendingModel = msg
+	}
+	if err := s.store.RecordUsageWithCost(ctx, s.run.Lease(), int64(callTurn), "model", tokens, cost, s.encode()); err != nil {
+		s.state = previousState
+		return nil, err
+	}
+	if costErr != nil {
+		return nil, errors.Join(costErr, callErr)
+	}
+	if callErr != nil {
+		s.retry = true
+		return nil, callErr
+	}
+	return m.applyResponse(ctx, msg)
+}
+
+func (m *boundaryModel) applyResponse(ctx context.Context, msg *schema.Message) (*schema.Message, error) {
+	s := m.execution
 	if msg.ResponseMeta != nil &&
 		(msg.ResponseMeta.FinishReason == "length" || msg.ResponseMeta.FinishReason == "content_filter") {
 		return nil, fmt.Errorf("incomplete model response: %s", msg.ResponseMeta.FinishReason)
 	}
-	s.state.Turn++
-	s.state.ReturnDirectlyStep = ""
+	if err := s.store.CheckUsageBudget(ctx, s.run.Lease()); err != nil {
+		return nil, err
+	}
 
 	if len(msg.ToolCalls) > 0 {
 		var batchError error

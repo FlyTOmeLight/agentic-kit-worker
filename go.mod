@@ -3,7 +3,7 @@ module github.com/FlyTOmeLight/agentic-kit-worker
 go 1.27.1
 
 require (
-	github.com/FlyTOmeLight/agentic-kit-api v0.5.3-0.20261109091017-347867c7e015
+	github.com/FlyTOmeLight/agentic-kit-api v0.5.3-0.20261118055355-f4f5b7db3d4d
 	github.com/FlyTOmeLight/server-go v0.13.0
 	github.com/agent-infra/sandbox-sdk-go v0.0.5
 	github.com/cloudwego/eino v0.9.2
@@ -121,5 +121,3 @@ require (
 	gorm.io/plugin/soft_delete v1.2.1 // indirect
 	resty.dev/v3 v3.0.0-rc.4 // indirect
 )
-
-replace github.com/FlyTOmeLight/agentic-kit-api => /Users/light/Code/agentic-kit-api

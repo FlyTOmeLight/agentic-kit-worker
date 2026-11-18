@@ -8,6 +8,8 @@ github.com/ClickHouse/ch-go v0.74.0 h1:uYs2m4wIt0ZHSM1E72rg0maCfzhR2V3xWb/vZEgpe
 github.com/ClickHouse/ch-go v0.74.0/go.mod h1:sZ/r+8ttZMjyrP9PuFbgoVbth1ywIu2LIQNA2vgko6M=
 github.com/ClickHouse/clickhouse-go/v2 v2.49.0 h1:HgiLTraLGgMe8kYivQ6RzMHDUkU/uFUpsWEAuhVk34Q=
 github.com/ClickHouse/clickhouse-go/v2 v2.49.0/go.mod h1:o8dSgGJGxY7CeWFNiKusF9a5RnLpgzuo7OaNyH0NQPE=
+github.com/FlyTOmeLight/agentic-kit-api v0.5.3-0.20261118055355-f4f5b7db3d4d h1:mWuFLloET1SWXJ0d7X81u1ON9hY/vatk9/fChINEwLM=
+github.com/FlyTOmeLight/agentic-kit-api v0.5.3-0.20261118055355-f4f5b7db3d4d/go.mod h1:c9qgFIJmCQpYpP9q4rTIEyevaffidgakfqDoMVqVdws=
 github.com/FlyTOmeLight/server-go v0.13.0 h1:mWG5mQUgacvQGNxWXZv9OWaRZNb8gppyp3QWEl3Z/Rg=
 github.com/FlyTOmeLight/server-go v0.13.0/go.mod h1:CvfXyE9tnPp2jKq7HGp/3yGzOxwNhy4Z8pipUolHYJQ=
 github.com/HuaweiCloudDeveloper/gaussdb-go v1.0.0-rc1 h1:OIZ83SgbK0ImF/vKFSfNoCAQWQySx5sYhj0RgsWbMbA=

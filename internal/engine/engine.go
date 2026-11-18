@@ -127,6 +127,16 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 		})
 	}
 	s.state.Version = 3
+	if s.state.InflightModel != nil {
+		marker := s.state.InflightModel
+		return s.block(ctx, fmt.Sprintf(
+			"model dispatch #%d (%s) has unknown consumption; automatic replay is disabled",
+			marker.Sequence, marker.Kind,
+		))
+	}
+	if err := s.checkPricing(ctx); err != nil {
+		return s.fail(ctx, err)
+	}
 	llm, bindings, err := e.Build(ctx, e.Store, run.Spec)
 	if err != nil {
 		return s.fail(ctx, err)
@@ -280,6 +290,12 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 	}
 	if errors.Is(err, durable.ErrLeaseLost) || ctx.Err() != nil {
 		return err
+	}
+	if marker := s.state.InflightModel; marker != nil {
+		return s.block(ctx, fmt.Sprintf(
+			"model dispatch #%d (%s) has unknown consumption; automatic replay is disabled: %v",
+			marker.Sequence, marker.Kind, err,
+		))
 	}
 	if s.retry {
 		return e.Store.Retry(ctx, run.Lease(), s.encode(), err.Error(), time.Second*time.Duration(run.Attempt))
