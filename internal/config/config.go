@@ -26,7 +26,9 @@ type PricingConfig map[string]any
 
 func (c PricingConfig) Validate() error {
 	if c != nil {
-		return errors.New("worker Pricing configuration is no longer accepted; configure pricing on the API and use frozen Run snapshots")
+		return errors.New(
+			"worker Pricing configuration is no longer accepted; configure pricing on the API and use frozen Run snapshots",
+		)
 	}
 	return nil
 }

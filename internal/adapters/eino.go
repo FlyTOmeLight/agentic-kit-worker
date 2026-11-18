@@ -174,7 +174,11 @@ func (m *usageModel) IsCallbacksEnabled() bool {
 	return components.IsCallbacksEnabled(m.ToolCallingChatModel)
 }
 
-func (m *usageModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+func (m *usageModel) Generate(
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...model.Option,
+) (*schema.Message, error) {
 	opts = append(opts, openai.WithResponseMessageModifier(preserveUnknownUsage))
 	return m.ToolCallingChatModel.Generate(ctx, input, opts...)
 }

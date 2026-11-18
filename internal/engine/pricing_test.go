@@ -14,7 +14,11 @@ func pricePointer(value float64) *float64 { return &value }
 
 func TestModelPricingCost(t *testing.T) {
 	t.Parallel()
-	pricing := engine.ModelPricing{InputPerMillion: 2, CachedInputPerMillion: pricePointer(0.5), OutputPerMillion: 10}
+	pricing := engine.ModelPricing{
+		InputPerMillion:       2,
+		CachedInputPerMillion: pricePointer(0.5),
+		OutputPerMillion:      10,
+	}
 	tests := []struct {
 		name    string
 		usage   *schema.TokenUsage
@@ -24,9 +28,13 @@ func TestModelPricingCost(t *testing.T) {
 		{name: "nil", wantErr: engine.ErrModelUsageUnavailable},
 		{name: "empty", usage: &schema.TokenUsage{}},
 		{
-			name:  "uncached prompt and completion",
-			usage: &schema.TokenUsage{PromptTokens: 1_000_000, CompletionTokens: 100_000, TotalTokens: 1_100_000},
-			want:  2 + 1,
+			name: "uncached prompt and completion",
+			usage: &schema.TokenUsage{
+				PromptTokens:     1_000_000,
+				CompletionTokens: 100_000,
+				TotalTokens:      1_100_000,
+			},
+			want: 2 + 1,
 		},
 		{
 			name: "cached tokens use cached price",
@@ -66,7 +74,10 @@ func TestModelPricingCost(t *testing.T) {
 			if test.name == "free model" {
 				pricing = engine.ModelPricing{}
 			}
-			if got, err := pricing.Cost(test.usage); math.Abs(got-test.want) > 1e-12 || !errors.Is(err, test.wantErr) {
+			if got, err := pricing.Cost(
+				test.usage,
+			); math.Abs(got-test.want) > 1e-12 ||
+				!errors.Is(err, test.wantErr) {
 				t.Fatalf("cost=%v err=%v, want %v / %v", got, err, test.want, test.wantErr)
 			}
 		})

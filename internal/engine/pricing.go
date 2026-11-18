@@ -64,7 +64,10 @@ func (p ModelPricing) Cost(usage *schema.TokenUsage) (float64, error) {
 
 func (s *execution) frozenPricing() (*ModelPricing, error) {
 	if !s.run.Spec.PricingFrozen {
-		return nil, fmt.Errorf("%w: run has no frozen pricing; resubmit through the API", ErrModelPricingUnavailable)
+		return nil, fmt.Errorf(
+			"%w: run has no frozen pricing; resubmit through the API",
+			ErrModelPricingUnavailable,
+		)
 	}
 	snapshot := s.run.Spec.PricingSnapshot
 	if snapshot == nil {
@@ -77,7 +80,10 @@ func (s *execution) frozenPricing() (*ModelPricing, error) {
 		return nil, fmt.Errorf("%w: snapshot version must not contain line breaks", ErrModelPricingUnavailable)
 	}
 	if snapshot.Model != s.run.Spec.Model.Name || snapshot.BaseURL != s.run.Spec.Model.BaseURL {
-		return nil, fmt.Errorf("%w: snapshot model or base URL does not match the run", ErrModelPricingUnavailable)
+		return nil, fmt.Errorf(
+			"%w: snapshot model or base URL does not match the run",
+			ErrModelPricingUnavailable,
+		)
 	}
 	pricing := &ModelPricing{
 		InputPerMillion:       snapshot.InputPerMillion,
@@ -118,7 +124,10 @@ func (s *execution) checkPricing(ctx context.Context) error {
 			return err
 		}
 		if goal.Budget.MaxCostUSD > 0 {
-			return fmt.Errorf("%w: a cost budget requires a frozen pricing snapshot", ErrModelPricingUnavailable)
+			return fmt.Errorf(
+				"%w: a cost budget requires a frozen pricing snapshot",
+				ErrModelPricingUnavailable,
+			)
 		}
 	}
 	return nil

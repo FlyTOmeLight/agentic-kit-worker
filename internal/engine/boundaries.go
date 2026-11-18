@@ -196,7 +196,15 @@ func (m *boundaryModel) complete(ctx context.Context, msg *schema.Message, callE
 	if callErr == nil {
 		s.state.PendingModel = msg
 	}
-	if err := s.store.RecordUsageWithCost(ctx, s.run.Lease(), int64(callTurn), "model", tokens, cost, s.encode()); err != nil {
+	if err := s.store.RecordUsageWithCost(
+		ctx,
+		s.run.Lease(),
+		int64(callTurn),
+		"model",
+		tokens,
+		cost,
+		s.encode(),
+	); err != nil {
 		s.state = previousState
 		return nil, err
 	}

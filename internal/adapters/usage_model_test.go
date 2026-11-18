@@ -49,14 +49,22 @@ func TestUsageModelForwardsCallbacks(t *testing.T) {
 				base.bound = testCase.bound
 			}
 			wrapped := &usageModel{ToolCallingChatModel: testCase.base}
-			if got, want := components.IsCallbacksEnabled(wrapped), components.IsCallbacksEnabled(testCase.base); got != want {
+			if got, want := components.IsCallbacksEnabled(
+				wrapped,
+			), components.IsCallbacksEnabled(
+				testCase.base,
+			); got != want {
 				t.Fatalf("callbacks before WithTools=%t, want %t", got, want)
 			}
 			bound, err := wrapped.WithTools([]*schema.ToolInfo{{Name: "lookup"}})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got, want := components.IsCallbacksEnabled(bound), components.IsCallbacksEnabled(testCase.bound); got != want {
+			if got, want := components.IsCallbacksEnabled(
+				bound,
+			), components.IsCallbacksEnabled(
+				testCase.bound,
+			); got != want {
 				t.Fatalf("callbacks after WithTools=%t, want %t", got, want)
 			}
 		})

@@ -29,86 +29,131 @@ func TestBuildModelHTTPUsage(t *testing.T) {
 	} {
 		for _, stream := range []bool{false, true} {
 			for _, bindTools := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/stream=%t/tools=%t", testCase.name, stream, bindTools), func(t *testing.T) {
-					server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-						var body struct {
-							Stream        bool `json:"stream"`
-							StreamOptions struct {
-								IncludeUsage bool `json:"include_usage"`
-							} `json:"stream_options"`
-							Tools []json.RawMessage `json:"tools"`
-						}
-						if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-							t.Error(err)
-							return
-						}
-						if body.Stream != stream || (stream && !body.StreamOptions.IncludeUsage) || (len(body.Tools) != 0) != bindTools {
-							t.Errorf("unexpected request: %+v", body)
-						}
-						usage := ""
-						if testCase.usage != "" {
-							usage = `,"usage":` + testCase.usage
-						}
-						if stream {
-							response.Header().Set("Content-Type", "text/event-stream")
-							fmt.Fprint(response, "data: {\"id\":\"reply\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\",\"reasoning_content\":\"reason\"}}]}\n\n")
-							fmt.Fprint(response, "data: {\"id\":\"reply\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
-							fmt.Fprintf(response, "data: {\"id\":\"reply\",\"choices\":[]%s}\n\ndata: [DONE]\n\n", usage)
-							return
-						}
-						response.Header().Set("Content-Type", "application/json")
-						fmt.Fprintf(response, `{"id":"reply","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning_content":"reason"},"finish_reason":"stop"}]%s}`, usage)
-					}))
-					defer server.Close()
-					ctx := context.Background()
-					llm, err := buildModel(ctx, durable.ModelSpec{Name: "model", BaseURL: server.URL})
-					if err != nil {
-						t.Fatal(err)
-					}
-					if bindTools {
-						llm, err = llm.WithTools([]*schema.ToolInfo{{Name: "lookup", Desc: "lookup", ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{})}})
+				t.Run(
+					fmt.Sprintf("%s/stream=%t/tools=%t", testCase.name, stream, bindTools),
+					func(t *testing.T) {
+						server := httptest.NewServer(
+							http.HandlerFunc(
+								func(response http.ResponseWriter, request *http.Request) {
+									var body struct {
+										Stream        bool `json:"stream"`
+										StreamOptions struct {
+											IncludeUsage bool `json:"include_usage"`
+										} `json:"stream_options"`
+										Tools []json.RawMessage `json:"tools"`
+									}
+									if err := json.NewDecoder(request.Body).
+										Decode(&body); err != nil {
+										t.Error(err)
+										return
+									}
+									if body.Stream != stream ||
+										(stream && !body.StreamOptions.IncludeUsage) ||
+										(len(body.Tools) != 0) != bindTools {
+										t.Errorf(
+											"unexpected request: %+v",
+											body,
+										)
+									}
+									usage := ""
+									if testCase.usage != "" {
+										usage = `,"usage":` + testCase.usage
+									}
+									if stream {
+										response.Header().
+											Set("Content-Type", "text/event-stream")
+										fmt.Fprint(
+											response,
+											"data: {\"id\":\"reply\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\",\"reasoning_content\":\"reason\"}}]}\n\n",
+										)
+										fmt.Fprint(
+											response,
+											"data: {\"id\":\"reply\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+										)
+										fmt.Fprintf(
+											response,
+											"data: {\"id\":\"reply\",\"choices\":[]%s}\n\ndata: [DONE]\n\n",
+											usage,
+										)
+										return
+									}
+									response.Header().
+										Set("Content-Type", "application/json")
+									fmt.Fprintf(
+										response,
+										`{"id":"reply","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning_content":"reason"},"finish_reason":"stop"}]%s}`,
+										usage,
+									)
+								},
+							),
+						)
+						defer server.Close()
+						ctx := context.Background()
+						llm, err := buildModel(
+							ctx,
+							durable.ModelSpec{Name: "model", BaseURL: server.URL},
+						)
 						if err != nil {
 							t.Fatal(err)
 						}
-					}
-					input := []*schema.Message{schema.UserMessage("query")}
-					var result *schema.Message
-					if stream {
-						reader, streamErr := llm.Stream(ctx, input)
-						if streamErr != nil {
-							t.Fatal(streamErr)
-						}
-						defer reader.Close()
-						var chunks []*schema.Message
-						for {
-							chunk, recvErr := reader.Recv()
-							if errors.Is(recvErr, io.EOF) {
-								break
+						if bindTools {
+							llm, err = llm.WithTools(
+								[]*schema.ToolInfo{
+									{
+										Name: "lookup",
+										Desc: "lookup",
+										ParamsOneOf: schema.NewParamsOneOfByParams(
+											map[string]*schema.ParameterInfo{},
+										),
+									},
+								},
+							)
+							if err != nil {
+								t.Fatal(err)
 							}
-							if recvErr != nil {
-								t.Fatal(recvErr)
+						}
+						input := []*schema.Message{schema.UserMessage("query")}
+						var result *schema.Message
+						if stream {
+							reader, streamErr := llm.Stream(ctx, input)
+							if streamErr != nil {
+								t.Fatal(streamErr)
 							}
-							chunks = append(chunks, chunk)
+							defer reader.Close()
+							var chunks []*schema.Message
+							for {
+								chunk, recvErr := reader.Recv()
+								if errors.Is(recvErr, io.EOF) {
+									break
+								}
+								if recvErr != nil {
+									t.Fatal(recvErr)
+								}
+								chunks = append(chunks, chunk)
+							}
+							result, err = schema.ConcatMessages(chunks)
+						} else {
+							result, err = llm.Generate(ctx, input)
 						}
-						result, err = schema.ConcatMessages(chunks)
-					} else {
-						result, err = llm.Generate(ctx, input)
-					}
-					if err != nil {
-						t.Fatal(err)
-					}
-					if result == nil || result.Content != "hello" || result.ReasoningContent != "reason" || result.ResponseMeta == nil || result.ResponseMeta.FinishReason != "stop" {
-						t.Fatalf("response metadata lost: %+v", result)
-					}
-					usage := result.ResponseMeta.Usage
-					if testCase.wantUsage == nil {
-						if usage != nil {
-							t.Fatalf("unknown usage synthesized: %+v", usage)
+						if err != nil {
+							t.Fatal(err)
 						}
-					} else if usage == nil || usage.TotalTokens != testCase.wantUsage.TotalTokens || usage.PromptTokens != testCase.wantUsage.PromptTokens || usage.CompletionTokens != testCase.wantUsage.CompletionTokens {
-						t.Fatalf("usage=%+v want=%+v", usage, testCase.wantUsage)
-					}
-				})
+						if result == nil || result.Content != "hello" ||
+							result.ReasoningContent != "reason" ||
+							result.ResponseMeta == nil ||
+							result.ResponseMeta.FinishReason != "stop" {
+							t.Fatalf("response metadata lost: %+v", result)
+						}
+						usage := result.ResponseMeta.Usage
+						if testCase.wantUsage == nil {
+							if usage != nil {
+								t.Fatalf("unknown usage synthesized: %+v", usage)
+							}
+						} else if usage == nil || usage.TotalTokens != testCase.wantUsage.TotalTokens || usage.PromptTokens != testCase.wantUsage.PromptTokens || usage.CompletionTokens != testCase.wantUsage.CompletionTokens {
+							t.Fatalf("usage=%+v want=%+v", usage, testCase.wantUsage)
+						}
+					},
+				)
 			}
 		}
 	}
@@ -236,30 +281,42 @@ func TestSummarizerHTTPUsage(t *testing.T) {
 		{name: "record failure", usage: `{"total_tokens":42}`, wantCalls: 1, wantTokens: 42, recordErr: recordErr, wantErr: recordErr},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-				response.Header().Set("Content-Type", "application/json")
-				if testCase.status != 0 {
-					response.WriteHeader(testCase.status)
-					fmt.Fprint(response, `{"error":{"message":"summary rejected","type":"invalid_request_error"}}`)
-					return
-				}
-				usage := ""
-				if testCase.usage != "" {
-					usage = `,"usage":` + testCase.usage
-				}
-				fmt.Fprintf(response, `{"id":"summary","choices":[{"index":0,"message":{"role":"assistant","content":"summary"},"finish_reason":"stop"}]%s}`, usage)
-			}))
+			server := httptest.NewServer(
+				http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+					response.Header().Set("Content-Type", "application/json")
+					if testCase.status != 0 {
+						response.WriteHeader(testCase.status)
+						fmt.Fprint(
+							response,
+							`{"error":{"message":"summary rejected","type":"invalid_request_error"}}`,
+						)
+						return
+					}
+					usage := ""
+					if testCase.usage != "" {
+						usage = `,"usage":` + testCase.usage
+					}
+					fmt.Fprintf(
+						response,
+						`{"id":"summary","choices":[{"index":0,"message":{"role":"assistant","content":"summary"},"finish_reason":"stop"}]%s}`,
+						usage,
+					)
+				}),
+			)
 			defer server.Close()
 			calls, tokens := 0, int64(0)
 			summary, err := (Summarizer{}).Summarize(context.Background(), engine.SummaryInput{
-				Spec: durable.Spec{Model: durable.ModelSpec{Name: "summary-model", BaseURL: server.URL}},
+				Spec: durable.Spec{
+					Model: durable.ModelSpec{Name: "summary-model", BaseURL: server.URL},
+				},
 				RecordUsage: func(_ context.Context, _ *schema.TokenUsage, value int64) error {
 					calls++
 					tokens = value
 					return testCase.recordErr
 				},
 			})
-			if !errors.Is(err, testCase.wantErr) || calls != testCase.wantCalls || tokens != testCase.wantTokens {
+			if !errors.Is(err, testCase.wantErr) || calls != testCase.wantCalls ||
+				tokens != testCase.wantTokens {
 				t.Fatalf("summary=%q err=%v calls=%d tokens=%d", summary, err, calls, tokens)
 			}
 			if testCase.wantErr != nil && summary != "" {
@@ -287,14 +344,21 @@ func TestSummaryResultRecordsUsageAlongsideError(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			calls := 0
-			_, err := summaryResult(context.Background(), testCase.response, modelErr, func(_ context.Context, _ *schema.TokenUsage, tokens int64) error {
-				calls++
-				if tokens != 17 {
-					t.Errorf("tokens=%d, want 17", tokens)
-				}
-				return testCase.recordErr
-			})
-			if !errors.Is(err, modelErr) || (testCase.wantErr != nil && !errors.Is(err, testCase.wantErr)) || calls != testCase.wantCalls {
+			_, err := summaryResult(
+				context.Background(),
+				testCase.response,
+				modelErr,
+				func(_ context.Context, _ *schema.TokenUsage, tokens int64) error {
+					calls++
+					if tokens != 17 {
+						t.Errorf("tokens=%d, want 17", tokens)
+					}
+					return testCase.recordErr
+				},
+			)
+			if !errors.Is(err, modelErr) ||
+				(testCase.wantErr != nil && !errors.Is(err, testCase.wantErr)) ||
+				calls != testCase.wantCalls {
 				t.Fatalf("err=%v calls=%d", err, calls)
 			}
 		})

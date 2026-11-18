@@ -119,7 +119,13 @@ func toolReply(name string) *schema.Message {
 	}
 }
 
-func submit(t *testing.T, s *durable.Store, name string, policy durable.Policy, configureSpec ...func(*durable.Spec)) *durable.Run {
+func submit(
+	t *testing.T,
+	s *durable.Store,
+	name string,
+	policy durable.Policy,
+	configureSpec ...func(*durable.Spec),
+) *durable.Run {
 	t.Helper()
 	_, r := submitChatFixture(t, s, "owner", "test", durable.AgentConfig{
 		Model:    durable.ModelSpec{Name: "test", BaseURL: "http://localhost:11434/v1"},
@@ -537,11 +543,16 @@ func TestInflightModelBlocksReplacement(t *testing.T) {
 	if done.Status != durable.Blocked {
 		t.Fatalf("expected blocked run, got %+v", done)
 	}
-	if !strings.Contains(done.Error, "unknown consumption") || !strings.Contains(done.Error, "automatic replay is disabled") {
+	if !strings.Contains(done.Error, "unknown consumption") ||
+		!strings.Contains(done.Error, "automatic replay is disabled") {
 		t.Fatalf("unexpected block detail: %q", done.Error)
 	}
 	if builds != 0 || toolCalls != 0 {
-		t.Fatalf("replacement must not build, call the model, or run tools: builds=%d toolCalls=%d", builds, toolCalls)
+		t.Fatalf(
+			"replacement must not build, call the model, or run tools: builds=%d toolCalls=%d",
+			builds,
+			toolCalls,
+		)
 	}
 	if _, err = reopened.Claim(ctx, "third-worker", time.Minute); !errors.Is(err, durable.ErrNoWork) {
 		t.Fatal("blocked run must not be claimable")

@@ -9,9 +9,10 @@ import (
 	"time"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
-	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+
+	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
 func TestUnblockResumesWithoutRepeatingCompletedTools(t *testing.T) {
@@ -51,33 +52,42 @@ func TestUnblockResumesWithoutRepeatingCompletedTools(t *testing.T) {
 			resuming := false
 			providerErr := errors.New("model transport reset")
 			build := func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
-				return &fakeModel{generate: func(_ context.Context, input []*schema.Message) (*schema.Message, error) {
-					models++
-					if err := checkToolPairs(input); err != nil {
-						return nil, err
-					}
-					if !resuming {
-						if models <= testCase.tools {
-							return toolReply("lookup"), nil
+				return &fakeModel{
+					generate: func(_ context.Context, input []*schema.Message) (*schema.Message, error) {
+						models++
+						if err := checkToolPairs(input); err != nil {
+							return nil, err
 						}
-						return nil, providerErr
-					}
-					return schema.AssistantMessage("resumed after approval", nil), nil
-				}}, map[string]engine.Binding{"lookup": {
-					Policy: durable.ReadOnly,
-					Tool: &fakeTool{name: "lookup", invoke: func(context.Context, string) (string, error) {
-						tools++
-						return "saved tool result", nil
-					}},
-				}}, nil
+						if !resuming {
+							if models <= testCase.tools {
+								return toolReply("lookup"), nil
+							}
+							return nil, providerErr
+						}
+						return schema.AssistantMessage("resumed after approval", nil), nil
+					},
+				}, map[string]engine.Binding{
+					"lookup": {
+						Policy: durable.ReadOnly,
+						Tool: &fakeTool{
+							name: "lookup",
+							invoke: func(context.Context, string) (string, error) {
+								tools++
+								return "saved tool result", nil
+							},
+						},
+					},
+				}, nil
 			}
 			first := &engine.Engine{Store: store, Build: build}
 			if testCase.kind == "summary" {
 				first.CompactionMaxBytes = 1
-				first.Summarizer = summaryFunc(func(context.Context, engine.SummaryInput) (string, error) {
-					summaries++
-					return "unaccounted summary", testCase.summaryErr
-				})
+				first.Summarizer = summaryFunc(
+					func(context.Context, engine.SummaryInput) (string, error) {
+						summaries++
+						return "unaccounted summary", testCase.summaryErr
+					},
+				)
 			}
 			if err = first.Execute(ctx, claim); err != nil {
 				t.Fatal(err)
@@ -94,17 +104,36 @@ func TestUnblockResumesWithoutRepeatingCompletedTools(t *testing.T) {
 				blockedState.InflightModel == nil || blockedState.InflightModel.Kind != testCase.kind ||
 				len(blockedState.Checkpoint) == 0 || blockedState.Turn != testCase.tools ||
 				blocked.TokensUsed != int64(testCase.tools) || tools != testCase.tools {
-				t.Fatalf("unexpected blocked execution: run=%+v state=%+v models=%d tools=%d", blocked, blockedState, models, tools)
+				t.Fatalf(
+					"unexpected blocked execution: run=%+v state=%+v models=%d tools=%d",
+					blocked,
+					blockedState,
+					models,
+					tools,
+				)
 			}
 			if !strings.Contains(blocked.Error, "unknown consumption") ||
 				(testCase.kind == "model" && !strings.Contains(blocked.Error, providerErr.Error())) ||
 				(testCase.summaryErr != nil && !strings.Contains(blocked.Error, testCase.summaryErr.Error())) {
 				t.Fatalf("blocked execution lost its cause: %q", blocked.Error)
 			}
-			if _, err = store.Claim(ctx, "automatic-replay", time.Minute); !errors.Is(err, durable.ErrNoWork) {
+			if _, err = store.Claim(
+				ctx,
+				"automatic-replay",
+				time.Minute,
+			); !errors.Is(
+				err,
+				durable.ErrNoWork,
+			) {
 				t.Fatalf("unknown dispatch was automatically retried: %v", err)
 			}
-			if err = store.Unblock(ctx, "owner", run.ID, blocked.Epoch, "Reviewed unknown consumption; authorize a fresh dispatch"); err != nil {
+			if err = store.Unblock(
+				ctx,
+				"owner",
+				run.ID,
+				blocked.Epoch,
+				"Reviewed unknown consumption; authorize a fresh dispatch",
+			); err != nil {
 				t.Fatal(err)
 			}
 			queued, err := store.Get(ctx, "owner", run.ID)
@@ -115,10 +144,17 @@ func TestUnblockResumesWithoutRepeatingCompletedTools(t *testing.T) {
 			if err = json.Unmarshal(queued.State, &queuedState); err != nil {
 				t.Fatal(err)
 			}
-			if queued.Status != durable.Queued || queued.Epoch <= blocked.Epoch || queuedState.InflightModel != nil ||
-				queuedState.Turn != blockedState.Turn || queuedState.SummaryCalls != blockedState.SummaryCalls ||
-				string(queuedState.Checkpoint) != string(blockedState.Checkpoint) || queued.TokensUsed != blocked.TokensUsed {
-				t.Fatalf("unblock changed execution progress: queued=%+v state=%+v", queued, queuedState)
+			if queued.Status != durable.Queued || queued.Epoch <= blocked.Epoch ||
+				queuedState.InflightModel != nil ||
+				queuedState.Turn != blockedState.Turn ||
+				queuedState.SummaryCalls != blockedState.SummaryCalls ||
+				string(queuedState.Checkpoint) != string(blockedState.Checkpoint) ||
+				queued.TokensUsed != blocked.TokensUsed {
+				t.Fatalf(
+					"unblock changed execution progress: queued=%+v state=%+v",
+					queued,
+					queuedState,
+				)
 			}
 			reopened, err := durable.Open(ctx, dsn)
 			if err != nil {
@@ -133,12 +169,18 @@ func TestUnblockResumesWithoutRepeatingCompletedTools(t *testing.T) {
 			second := &engine.Engine{Store: reopened, Build: build}
 			if testCase.kind == "summary" {
 				second.CompactionMaxBytes = 1
-				second.Summarizer = summaryFunc(func(summaryCtx context.Context, input engine.SummaryInput) (string, error) {
-					summaries++
-					return "confirmed earlier work", input.RecordUsage(summaryCtx, &schema.TokenUsage{
-						PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6,
-					}, 6)
-				})
+				second.Summarizer = summaryFunc(
+					func(summaryCtx context.Context, input engine.SummaryInput) (string, error) {
+						summaries++
+						return "confirmed earlier work", input.RecordUsage(
+							summaryCtx,
+							&schema.TokenUsage{
+								PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6,
+							},
+							6,
+						)
+					},
+				)
 			}
 			if err = second.Execute(ctx, replacement); err != nil {
 				t.Fatal(err)
@@ -158,7 +200,13 @@ func TestUnblockResumesWithoutRepeatingCompletedTools(t *testing.T) {
 			if done.Status != durable.Completed || done.Output != "resumed after approval" ||
 				doneState.InflightModel != nil || tools != testCase.tools || models != wantModels ||
 				summaries != wantSummaries || done.TokensUsed != testCase.tokens {
-				t.Fatalf("recovery run=%+v models=%d tools=%d summaries=%d", done, models, tools, summaries)
+				t.Fatalf(
+					"recovery run=%+v models=%d tools=%d summaries=%d",
+					done,
+					models,
+					tools,
+					summaries,
+				)
 			}
 			savedGoal, err := reopened.GetGoal(ctx, "owner", goal.ID)
 			if err != nil {
@@ -168,7 +216,11 @@ func TestUnblockResumesWithoutRepeatingCompletedTools(t *testing.T) {
 				t.Fatalf("goal did not resume with accounted usage: %+v", savedGoal)
 			}
 			var completedTools int64
-			if err = reopened.DB().Table("durable_step").Where("run_id = ? AND status = ?", run.ID, "Completed").Count(&completedTools).Error; err != nil {
+			if err = reopened.DB().
+				Table("durable_step").
+				Where("run_id = ? AND status = ?", run.ID, "Completed").
+				Count(&completedTools).
+				Error; err != nil {
 				t.Fatal(err)
 			}
 			if completedTools != int64(testCase.tools) {

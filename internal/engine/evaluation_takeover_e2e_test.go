@@ -434,7 +434,8 @@ func submitTakeoverRun(t *testing.T, store *durable.Store) *durable.Run {
 		`INSERT INTO agent_session (id, tenant_id, project_id, owner_id, agent_id, title, created_at, updated_at)
 		 VALUES (?, 'tenant', '', 'owner', ?, 'takeover', clock_timestamp(), clock_timestamp())`,
 		sessionID, agentID,
-	).Error; err != nil {
+	).
+		Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := db.WithContext(ctx).Exec(

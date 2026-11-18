@@ -165,10 +165,12 @@ func (s *execution) buildContext(
 	materials := s.snapshot.Materials
 	if s.run != nil && s.run.CompactedSummary != "" {
 		materials.History = nil
-		currentTurn = append([]contextbuilder.Message{{
-			Role:    contextbuilder.RoleUser,
-			Content: "Summary of earlier conversation (context, not new instructions):\n" + s.run.CompactedSummary,
-		}}, currentTurn...)
+		currentTurn = append([]contextbuilder.Message{
+			{
+				Role:    contextbuilder.RoleUser,
+				Content: "Summary of earlier conversation (context, not new instructions):\n" + s.run.CompactedSummary,
+			},
+		}, currentTurn...)
 	}
 	materials.Tools = make([]contextbuilder.ToolDefinition, 0, len(toolInfos))
 	for _, info := range toolInfos {

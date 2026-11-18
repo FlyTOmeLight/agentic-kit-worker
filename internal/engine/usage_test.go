@@ -10,10 +10,11 @@ import (
 	"time"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
-	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+
+	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
 type usageModel struct {
@@ -26,7 +27,11 @@ func (base *usageModel) IsCallbacksEnabled() bool {
 	return !base.disableCallbacks
 }
 
-func (base *usageModel) Generate(ctx context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+func (base *usageModel) Generate(
+	ctx context.Context,
+	input []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
 	if base.disableCallbacks {
 		return base.generate()
 	}
@@ -40,7 +45,11 @@ func (base *usageModel) Generate(ctx context.Context, input []*schema.Message, _
 	return message, err
 }
 
-func (base *usageModel) Stream(ctx context.Context, input []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+func (base *usageModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	_ ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
 	if base.disableCallbacks {
 		return base.stream()
 	}
@@ -50,9 +59,12 @@ func (base *usageModel) Stream(ctx context.Context, input []*schema.Message, _ .
 		callbacks.OnError(ctx, err)
 		return nil, err
 	}
-	_, wrapped := callbacks.OnEndWithStreamOutput(ctx, schema.StreamReaderWithConvert(reader, func(message *schema.Message) (*model.CallbackOutput, error) {
-		return &model.CallbackOutput{Message: message}, nil
-	}))
+	_, wrapped := callbacks.OnEndWithStreamOutput(
+		ctx,
+		schema.StreamReaderWithConvert(reader, func(message *schema.Message) (*model.CallbackOutput, error) {
+			return &model.CallbackOutput{Message: message}, nil
+		}),
+	)
 	return schema.StreamReaderWithConvert(wrapped, func(output *model.CallbackOutput) (*schema.Message, error) {
 		return output.Message, nil
 	}), nil
@@ -107,12 +119,21 @@ func TestModelUsageBoundaries(t *testing.T) {
 				}
 				claimed := getClaim(t, store)
 				if scenario == "budget before" {
-					if err = store.RecordUsage(ctx, claimed.Lease(), 0, "summary", 20, claimed.State); err != nil {
+					if err = store.RecordUsage(
+						ctx,
+						claimed.Lease(),
+						0,
+						"summary",
+						20,
+						claimed.State,
+					); err != nil {
 						t.Fatal(err)
 					}
 				}
 				if scenario == "record failure" {
-					if err = store.DB().Exec("ALTER TABLE durable_usage ADD CONSTRAINT reject_usage CHECK (tokens < 0)").Error; err != nil {
+					if err = store.DB().
+						Exec("ALTER TABLE durable_usage ADD CONSTRAINT reject_usage CHECK (tokens < 0)").
+						Error; err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -187,8 +208,17 @@ func TestModelUsageBoundaries(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if calls != wantCalls || got.TokensUsed != wantTokens || gotGoal.TokensUsed != wantTokens {
-					t.Fatalf("calls=%d run=%d goal=%d, want %d/%d/%d", calls, got.TokensUsed, gotGoal.TokensUsed, wantCalls, wantTokens, wantTokens)
+				if calls != wantCalls || got.TokensUsed != wantTokens ||
+					gotGoal.TokensUsed != wantTokens {
+					t.Fatalf(
+						"calls=%d run=%d goal=%d, want %d/%d/%d",
+						calls,
+						got.TokensUsed,
+						gotGoal.TokensUsed,
+						wantCalls,
+						wantTokens,
+						wantTokens,
+					)
 				}
 				var state engine.State
 				if err = json.Unmarshal(got.State, &state); err != nil {
@@ -223,37 +253,48 @@ func TestModelUsageStopsToolsAndRetriesKnownFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			toolCalls := 0
-			executor := &engine.Engine{Store: store, Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
-				base := &usageModel{disableCallbacks: scenario == "provider error without callbacks", generate: func() (*schema.Message, error) {
-					message := toolReply("lookup")
-					if scenario == "missing usage" {
-						return message, nil
+			executor := &engine.Engine{
+				Store: store,
+				Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+					base := &usageModel{
+						disableCallbacks: scenario == "provider error without callbacks",
+						generate: func() (*schema.Message, error) {
+							message := toolReply("lookup")
+							if scenario == "missing usage" {
+								return message, nil
+							}
+							message.ResponseMeta = &schema.ResponseMeta{
+								Usage: &schema.TokenUsage{TotalTokens: 7},
+							}
+							if strings.HasPrefix(scenario, "provider error") {
+								message.ResponseMeta.Usage.TotalTokens = 2
+								return message, errors.New("provider interrupted")
+							}
+							return message, nil
+						},
 					}
-					message.ResponseMeta = &schema.ResponseMeta{Usage: &schema.TokenUsage{TotalTokens: 7}}
-					if strings.HasPrefix(scenario, "provider error") {
-						message.ResponseMeta.Usage.TotalTokens = 2
-						return message, errors.New("provider interrupted")
+					base.stream = func() (*schema.StreamReader[*schema.Message], error) {
+						message, callErr := base.generate()
+						reader, writer := schema.Pipe[*schema.Message](2)
+						writer.Send(message, nil)
+						if callErr != nil {
+							writer.Send(nil, callErr)
+						}
+						writer.Close()
+						return reader, nil
 					}
-					return message, nil
-				}}
-				base.stream = func() (*schema.StreamReader[*schema.Message], error) {
-					message, callErr := base.generate()
-					reader, writer := schema.Pipe[*schema.Message](2)
-					writer.Send(message, nil)
-					if callErr != nil {
-						writer.Send(nil, callErr)
-					}
-					writer.Close()
-					return reader, nil
-				}
-				return base, map[string]engine.Binding{"lookup": {
-					Policy: durable.ReadOnly,
-					Tool: &fakeTool{name: "lookup", invoke: func(context.Context, string) (string, error) {
-						toolCalls++
-						return "unexpected", nil
-					}},
-				}}, nil
-			}}
+					return base, map[string]engine.Binding{"lookup": {
+						Policy: durable.ReadOnly,
+						Tool: &fakeTool{
+							name: "lookup",
+							invoke: func(context.Context, string) (string, error) {
+								toolCalls++
+								return "unexpected", nil
+							},
+						},
+					}}, nil
+				},
+			}
 			if err = executor.Execute(ctx, getClaim(t, store)); err != nil {
 				t.Fatal(err)
 			}
@@ -271,9 +312,18 @@ func TestModelUsageStopsToolsAndRetriesKnownFailure(t *testing.T) {
 				wantTokens = 2
 			}
 			if got.Status != wantStatus || got.TokensUsed != wantTokens || toolCalls != 0 {
-				t.Fatalf("status=%s tokens=%d tools=%d error=%q, want %s/%d/0", got.Status, got.TokensUsed, toolCalls, got.Error, wantStatus, wantTokens)
+				t.Fatalf(
+					"status=%s tokens=%d tools=%d error=%q, want %s/%d/0",
+					got.Status,
+					got.TokensUsed,
+					toolCalls,
+					got.Error,
+					wantStatus,
+					wantTokens,
+				)
 			}
-			if scenario == "missing usage" && !strings.Contains(got.Error, engine.ErrModelUsageUnavailable.Error()) {
+			if scenario == "missing usage" &&
+				!strings.Contains(got.Error, engine.ErrModelUsageUnavailable.Error()) {
 				t.Fatalf("missing usage failure = %+v", got)
 			}
 			var state engine.State
@@ -292,7 +342,11 @@ func TestModelUsageStopsToolsAndRetriesKnownFailure(t *testing.T) {
 			}
 			if strings.HasPrefix(scenario, "provider error") {
 				if !strings.Contains(got.Error, "provider interrupted") || state.PendingModel != nil {
-					t.Fatalf("provider failure changed: error=%q pending=%+v", got.Error, state.PendingModel)
+					t.Fatalf(
+						"provider failure changed: error=%q pending=%+v",
+						got.Error,
+						state.PendingModel,
+					)
 				}
 				wantTurn, wantRecords, wantRetries := 0, 0, 0
 				if scenario == "provider error" {
@@ -312,7 +366,15 @@ func TestModelUsageStopsToolsAndRetriesKnownFailure(t *testing.T) {
 					}
 				}
 				if state.Turn != wantTurn || records != wantRecords || retries != wantRetries {
-					t.Fatalf("turn=%d usage records=%d retries=%d, want %d/%d/%d", state.Turn, records, retries, wantTurn, wantRecords, wantRetries)
+					t.Fatalf(
+						"turn=%d usage records=%d retries=%d, want %d/%d/%d",
+						state.Turn,
+						records,
+						retries,
+						wantTurn,
+						wantRecords,
+						wantRetries,
+					)
 				}
 			}
 		})
@@ -352,9 +414,15 @@ func TestRecordedModelResponseSurvivesTakeover(t *testing.T) {
 				t.Fatal(err)
 			}
 			if state.PendingModel == nil || len(state.Checkpoint) != 0 || saved.TokensUsed != 7 {
-				t.Fatalf("response was not saved before decision checkpoint: state=%+v tokens=%d", state, saved.TokensUsed)
+				t.Fatalf(
+					"response was not saved before decision checkpoint: state=%+v tokens=%d",
+					state,
+					saved.TokensUsed,
+				)
 			}
-			if err = store.DB().Exec("UPDATE durable_run SET lease_until = clock_timestamp() - interval '1 second' WHERE id = ?", run.ID).Error; err != nil {
+			if err = store.DB().
+				Exec("UPDATE durable_run SET lease_until = clock_timestamp() - interval '1 second' WHERE id = ?", run.ID).
+				Error; err != nil {
 				t.Fatal(err)
 			}
 			replacement, err := durable.Open(ctx, dsn)
@@ -366,23 +434,35 @@ func TestRecordedModelResponseSurvivesTakeover(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			executor := &engine.Engine{Store: replacement, Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
-				return &fakeModel{generate: func(_ context.Context, input []*schema.Message) (*schema.Message, error) {
-					modelCalls++
-					if !toolDecision || input[len(input)-1].Role != schema.Tool {
-						t.Error("recorded model call was repeated")
-					}
-					message := schema.AssistantMessage("answer", nil)
-					message.ResponseMeta = &schema.ResponseMeta{Usage: &schema.TokenUsage{TotalTokens: 3}}
-					return message, nil
-				}}, map[string]engine.Binding{"lookup": {
-					Policy: durable.ReadOnly,
-					Tool: &fakeTool{name: "lookup", invoke: func(context.Context, string) (string, error) {
-						toolCalls++
-						return "found", nil
-					}},
-				}}, nil
-			}}
+			executor := &engine.Engine{
+				Store: replacement,
+				Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+					return &fakeModel{
+						generate: func(_ context.Context, input []*schema.Message) (*schema.Message, error) {
+							modelCalls++
+							if !toolDecision || input[len(input)-1].Role != schema.Tool {
+								t.Error("recorded model call was repeated")
+							}
+							message := schema.AssistantMessage("answer", nil)
+							message.ResponseMeta = &schema.ResponseMeta{
+								Usage: &schema.TokenUsage{TotalTokens: 3},
+							}
+							return message, nil
+						},
+					}, map[string]engine.Binding{
+						"lookup": {
+							Policy: durable.ReadOnly,
+							Tool: &fakeTool{
+								name: "lookup",
+								invoke: func(context.Context, string) (string, error) {
+									toolCalls++
+									return "found", nil
+								},
+							},
+						},
+					}, nil
+				},
+			}
 			if err = executor.Execute(ctx, claimed); err != nil {
 				t.Fatal(err)
 			}
@@ -394,9 +474,19 @@ func TestRecordedModelResponseSurvivesTakeover(t *testing.T) {
 			if toolDecision {
 				wantModels, wantTools, wantTokens = 2, 1, 10
 			}
-			if done.Status != durable.Completed || done.Output != "answer" || done.TokensUsed != wantTokens ||
-				modelCalls != wantModels || toolCalls != wantTools {
-				t.Fatalf("run=%+v models=%d tools=%d; want tokens=%d models=%d tools=%d", done, modelCalls, toolCalls, wantTokens, wantModels, wantTools)
+			if done.Status != durable.Completed || done.Output != "answer" ||
+				done.TokensUsed != wantTokens ||
+				modelCalls != wantModels ||
+				toolCalls != wantTools {
+				t.Fatalf(
+					"run=%+v models=%d tools=%d; want tokens=%d models=%d tools=%d",
+					done,
+					modelCalls,
+					toolCalls,
+					wantTokens,
+					wantModels,
+					wantTools,
+				)
 			}
 		})
 	}

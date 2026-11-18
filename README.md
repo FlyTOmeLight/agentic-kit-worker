@@ -3,6 +3,7 @@
 独立部署的 Agent 执行进程。从 PostgreSQL 领取任务，用 Eino ADK `ChatModelAgent + Runner` 执行单 Agent ReAct。Eino 管理模型／工具循环、消息上下文和 checkpoint；平台保存 checkpoint、执行权与工具结果，进程重启后由其他实例接管。
 
 Worker 在 `go.mod` 中固定配套的 `agentic-kit-api` 版本。构建前需确保该版本能从 Go 模块源下载。当前使用 Go 1.27.1、server-go v0.13.0 和 Eino v0.9.2。运行方式、模块认证与可选 `go work` 联合开发见 [API 启动说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/README.md)。
+私有 GitHub 模块的模块校验将关闭：`GONOSUMDB=github.com/FlyTOmeLight/*`（默认 Go 环境通过 `GOPRIVATE` 也能达到相同效果）。
 
 ## 项目结构
 

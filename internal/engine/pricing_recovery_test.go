@@ -10,9 +10,10 @@ import (
 	"time"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
-	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+
+	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
 func TestUnpricedModelSurvivesTakeover(t *testing.T) {
@@ -32,7 +33,13 @@ func TestUnpricedModelSurvivesTakeover(t *testing.T) {
 				response := func() (*schema.Message, error) {
 					calls++
 					message := toolReply("lookup")
-					message.ResponseMeta = &schema.ResponseMeta{Usage: &schema.TokenUsage{PromptTokens: 3, CompletionTokens: 4, TotalTokens: 7}}
+					message.ResponseMeta = &schema.ResponseMeta{
+						Usage: &schema.TokenUsage{
+							PromptTokens:     3,
+							CompletionTokens: 4,
+							TotalTokens:      7,
+						},
+					}
 					message.ResponseMeta.Usage = &schema.TokenUsage{TotalTokens: 7}
 					if scenario == "provider error" {
 						return message, providerErr
@@ -66,10 +73,13 @@ func TestUnpricedModelSurvivesTakeover(t *testing.T) {
 				if err = json.Unmarshal(saved.State, &state); err != nil {
 					t.Fatal(err)
 				}
-				if saved.TokensUsed != 7 || saved.CostUSD != 0 || state.PricingFailure == "" || state.Turn != 1 {
+				if saved.TokensUsed != 7 || saved.CostUSD != 0 || state.PricingFailure == "" ||
+					state.Turn != 1 {
 					t.Fatalf("run=%+v state=%+v", saved, state)
 				}
-				if err = store.DB().Exec("UPDATE durable_run SET lease_until = clock_timestamp() - interval '1 second' WHERE id = ?", run.ID).Error; err != nil {
+				if err = store.DB().
+					Exec("UPDATE durable_run SET lease_until = clock_timestamp() - interval '1 second' WHERE id = ?", run.ID).
+					Error; err != nil {
 					t.Fatal(err)
 				}
 				replacement, err := durable.Open(ctx, dsn)
@@ -82,10 +92,16 @@ func TestUnpricedModelSurvivesTakeover(t *testing.T) {
 					t.Fatal(err)
 				}
 				recovered := engine.ModelBoundaryForTest(t, replacement, reclaimed, base)
-				if message, err = invokeUsageModel(ctx, recovered, streaming); message != nil || !errors.Is(err, engine.ErrModelPricingUnavailable) {
+				if message, err = invokeUsageModel(
+					ctx,
+					recovered,
+					streaming,
+				); message != nil ||
+					!errors.Is(err, engine.ErrModelPricingUnavailable) {
 					t.Fatalf("takeover response=%+v error=%v", message, err)
 				}
-				executor := &engine.Engine{Store: replacement,
+				executor := &engine.Engine{
+					Store: replacement,
 					Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 						t.Error("unpriced call reached adapter build")
 						return nil, nil, errors.New("unexpected build")
@@ -99,10 +115,15 @@ func TestUnpricedModelSurvivesTakeover(t *testing.T) {
 					t.Fatal(err)
 				}
 				var count int64
-				if err = replacement.DB().Table("durable_usage").Where("run_id = ?", run.ID).Count(&count).Error; err != nil {
+				if err = replacement.DB().
+					Table("durable_usage").
+					Where("run_id = ?", run.ID).
+					Count(&count).
+					Error; err != nil {
 					t.Fatal(err)
 				}
-				if calls != 1 || count != 1 || done.Status != durable.Failed || done.TokensUsed != 7 || done.CostUSD != 0 {
+				if calls != 1 || count != 1 || done.Status != durable.Failed || done.TokensUsed != 7 ||
+					done.CostUSD != 0 {
 					t.Fatalf("calls=%d usage=%d run=%+v", calls, count, done)
 				}
 			})
@@ -121,25 +142,37 @@ func TestUnpricedSummarySurvivesTakeover(t *testing.T) {
 			attemptCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
 			models, summaries := 0, 0
-			executor := &engine.Engine{Store: store, CompactionMaxBytes: 1,
-				Summarizer: summaryFunc(func(summaryCtx context.Context, input engine.SummaryInput) (string, error) {
-					summaries++
-					usage := &schema.TokenUsage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7}
-					if scenario == "total only" {
-						usage = &schema.TokenUsage{TotalTokens: 7}
-					}
-					err := input.RecordUsage(summaryCtx, usage, 7)
-					if !errors.Is(err, engine.ErrModelPricingUnavailable) {
-						t.Errorf("summary pricing error=%v", err)
-					}
-					cancel()
-					return "", err
-				}),
+			executor := &engine.Engine{
+				Store:              store,
+				CompactionMaxBytes: 1,
+				Summarizer: summaryFunc(
+					func(summaryCtx context.Context, input engine.SummaryInput) (string, error) {
+						summaries++
+						usage := &schema.TokenUsage{
+							PromptTokens:     5,
+							CompletionTokens: 2,
+							TotalTokens:      7,
+						}
+						if scenario == "total only" {
+							usage = &schema.TokenUsage{TotalTokens: 7}
+						}
+						err := input.RecordUsage(summaryCtx, usage, 7)
+						if !errors.Is(err, engine.ErrModelPricingUnavailable) {
+							t.Errorf("summary pricing error=%v", err)
+						}
+						cancel()
+						return "", err
+					},
+				),
 				Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
-					return &fakeModel{generate: func(context.Context, []*schema.Message) (*schema.Message, error) {
-						models++
-						return schema.AssistantMessage("unexpected", nil), nil
-					}}, map[string]engine.Binding{"lookup": {Policy: durable.ReadOnly, Tool: &fakeTool{name: "lookup"}}}, nil
+					return &fakeModel{
+						generate: func(context.Context, []*schema.Message) (*schema.Message, error) {
+							models++
+							return schema.AssistantMessage("unexpected", nil), nil
+						},
+					}, map[string]engine.Binding{
+						"lookup": {Policy: durable.ReadOnly, Tool: &fakeTool{name: "lookup"}},
+					}, nil
 				},
 			}
 			if err := executor.Execute(attemptCtx, claimed); !errors.Is(err, context.Canceled) {
@@ -153,10 +186,14 @@ func TestUnpricedSummarySurvivesTakeover(t *testing.T) {
 			if err = json.Unmarshal(saved.State, &state); err != nil {
 				t.Fatal(err)
 			}
-			if state.SummaryCalls != 1 || state.PricingFailure == "" || saved.TokensUsed != 7 || saved.CostUSD != 0 || saved.Status != durable.Running {
+			if state.SummaryCalls != 1 || state.PricingFailure == "" || saved.TokensUsed != 7 ||
+				saved.CostUSD != 0 ||
+				saved.Status != durable.Running {
 				t.Fatalf("run=%+v state=%+v", saved, state)
 			}
-			if err = store.DB().Exec("UPDATE durable_run SET lease_until = clock_timestamp() - interval '1 second' WHERE id = ?", run.ID).Error; err != nil {
+			if err = store.DB().
+				Exec("UPDATE durable_run SET lease_until = clock_timestamp() - interval '1 second' WHERE id = ?", run.ID).
+				Error; err != nil {
 				t.Fatal(err)
 			}
 			replacement, err := durable.Open(ctx, dsn)
@@ -176,8 +213,12 @@ func TestUnpricedSummarySurvivesTakeover(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if done.Status != durable.Failed || !strings.Contains(done.Error, engine.ErrModelPricingUnavailable.Error()) ||
-				models != 0 || summaries != 1 || done.TokensUsed != 7 || done.CostUSD != 0 {
+			if done.Status != durable.Failed ||
+				!strings.Contains(done.Error, engine.ErrModelPricingUnavailable.Error()) ||
+				models != 0 ||
+				summaries != 1 ||
+				done.TokensUsed != 7 ||
+				done.CostUSD != 0 {
 				t.Fatalf("run=%+v summaries=%d models=%d", done, summaries, models)
 			}
 		})
@@ -195,8 +236,15 @@ func TestCostBudgetRequiresPricing(t *testing.T) {
 			ctx := context.Background()
 			run := submit(t, store, "lookup", durable.ReadOnly)
 			goal, _, err := store.CreateGoal(ctx, durable.Goal{
-				OwnerID: "owner", SessionID: run.SessionID, RequestKey: "cost", RequestHash: "cost", Objective: "finish",
-				Evaluator: durable.EvaluatorSpec{Kind: durable.EvaluatorNone}, Budget: durable.BudgetSpec{MaxCostUSD: 1},
+				OwnerID:     "owner",
+				SessionID:   run.SessionID,
+				RequestKey:  "cost",
+				RequestHash: "cost",
+				Objective:   "finish",
+				Evaluator: durable.EvaluatorSpec{
+					Kind: durable.EvaluatorNone,
+				},
+				Budget: durable.BudgetSpec{MaxCostUSD: 1},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -206,12 +254,25 @@ func TestCostBudgetRequiresPricing(t *testing.T) {
 			}
 			claimed := getClaim(t, store)
 			calls := 0
-			executor := &engine.Engine{Store: store, Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
-				calls++
-				return &fakeModel{generate: func(context.Context, []*schema.Message) (*schema.Message, error) {
-					return &schema.Message{Role: schema.Assistant, Content: "done", ResponseMeta: &schema.ResponseMeta{Usage: &schema.TokenUsage{PromptTokens: 3}}}, nil
-				}}, map[string]engine.Binding{"lookup": {Policy: durable.ReadOnly, Tool: &fakeTool{name: "lookup"}}}, nil
-			}}
+			executor := &engine.Engine{
+				Store: store,
+				Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+					calls++
+					return &fakeModel{
+						generate: func(context.Context, []*schema.Message) (*schema.Message, error) {
+							return &schema.Message{
+								Role:    schema.Assistant,
+								Content: "done",
+								ResponseMeta: &schema.ResponseMeta{
+									Usage: &schema.TokenUsage{PromptTokens: 3},
+								},
+							}, nil
+						},
+					}, map[string]engine.Binding{
+						"lookup": {Policy: durable.ReadOnly, Tool: &fakeTool{name: "lookup"}},
+					}, nil
+				},
+			}
 			if configured {
 				pricedSpec(0, 0)(&claimed.Spec)
 			}
@@ -223,7 +284,8 @@ func TestCostBudgetRequiresPricing(t *testing.T) {
 				t.Fatal(err)
 			}
 			if configured {
-				if calls != 1 || done.Status != durable.Completed || done.CostUSD != 0 || done.TokensUsed != 3 {
+				if calls != 1 || done.Status != durable.Completed || done.CostUSD != 0 ||
+					done.TokensUsed != 3 {
 					t.Fatalf("calls=%d run=%+v", calls, done)
 				}
 			} else if calls != 0 || done.Status != durable.Failed || !strings.Contains(done.Error, engine.ErrModelPricingUnavailable.Error()) || done.TokensUsed != 0 {
@@ -247,10 +309,14 @@ func TestFrozenPricingSurvivesTakeoverAndPriceChange(t *testing.T) {
 	calls := 0
 	response := func() *schema.Message {
 		calls++
-		return &schema.Message{Role: schema.Assistant, Content: "done", ResponseMeta: &schema.ResponseMeta{Usage: &schema.TokenUsage{
-			PromptTokens: 1_000_000, CompletionTokens: 100_000, TotalTokens: 1_100_000,
-			PromptTokenDetails: schema.PromptTokenDetails{CachedTokens: 500_000},
-		}}}
+		return &schema.Message{
+			Role:    schema.Assistant,
+			Content: "done",
+			ResponseMeta: &schema.ResponseMeta{Usage: &schema.TokenUsage{
+				PromptTokens: 1_000_000, CompletionTokens: 100_000, TotalTokens: 1_100_000,
+				PromptTokenDetails: schema.PromptTokenDetails{CachedTokens: 500_000},
+			}},
+		}
 	}
 	providerErr := errors.New("interrupted after usage")
 	first := engine.ModelBoundaryForTest(t, store, claimed, &usageModel{generate: func() (*schema.Message, error) {
@@ -264,11 +330,18 @@ func TestFrozenPricingSurvivesTakeoverAndPriceChange(t *testing.T) {
 	if newClaim.ID != newRun.ID {
 		t.Fatalf("claimed %s, want %s", newClaim.ID, newRun.ID)
 	}
-	newBoundary := engine.ModelBoundaryForTest(t, store, newClaim, &usageModel{generate: func() (*schema.Message, error) { return response(), nil }})
+	newBoundary := engine.ModelBoundaryForTest(
+		t,
+		store,
+		newClaim,
+		&usageModel{generate: func() (*schema.Message, error) { return response(), nil }},
+	)
 	if _, err := invokeUsageModel(ctx, newBoundary, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DB().Exec("UPDATE durable_run SET lease_until = clock_timestamp() - interval '1 second' WHERE id = ?", run.ID).Error; err != nil {
+	if err := store.DB().
+		Exec("UPDATE durable_run SET lease_until = clock_timestamp() - interval '1 second' WHERE id = ?", run.ID).
+		Error; err != nil {
 		t.Fatal(err)
 	}
 	replacement, err := durable.Open(ctx, dsn)
@@ -284,7 +357,12 @@ func TestFrozenPricingSurvivesTakeoverAndPriceChange(t *testing.T) {
 		reclaimed.Spec.PricingSnapshot.InputPerMillion != 2 || *reclaimed.Spec.PricingSnapshot.CachedInputPerMillion != 0.5 {
 		t.Fatalf("snapshot not restored: %+v", reclaimed)
 	}
-	recovered := engine.ModelBoundaryForTest(t, replacement, reclaimed, &usageModel{generate: func() (*schema.Message, error) { return response(), nil }})
+	recovered := engine.ModelBoundaryForTest(
+		t,
+		replacement,
+		reclaimed,
+		&usageModel{generate: func() (*schema.Message, error) { return response(), nil }},
+	)
 	if _, err = invokeUsageModel(ctx, recovered, false); err != nil {
 		t.Fatal(err)
 	}
@@ -296,8 +374,15 @@ func TestFrozenPricingSurvivesTakeoverAndPriceChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != 3 || oldSaved.TokensUsed != 2_200_000 || math.Abs(oldSaved.CostUSD-4.5) > 1e-12 || math.Abs(newSaved.CostUSD-22.5) > 1e-12 {
-		t.Fatalf("calls=%d old cost=%v tokens=%d new cost=%v", calls, oldSaved.CostUSD, oldSaved.TokensUsed, newSaved.CostUSD)
+	if calls != 3 || oldSaved.TokensUsed != 2_200_000 || math.Abs(oldSaved.CostUSD-4.5) > 1e-12 ||
+		math.Abs(newSaved.CostUSD-22.5) > 1e-12 {
+		t.Fatalf(
+			"calls=%d old cost=%v tokens=%d new cost=%v",
+			calls,
+			oldSaved.CostUSD,
+			oldSaved.TokensUsed,
+			newSaved.CostUSD,
+		)
 	}
 }
 
@@ -306,7 +391,9 @@ func TestLegacyRunFailsBeforeBuildAndSummary(t *testing.T) {
 	run := submit(t, store, "lookup", durable.ReadOnly)
 	claimed := getClaim(t, store)
 	claimed.Spec.PricingFrozen = false
-	executor := &engine.Engine{Store: store, CompactionMaxBytes: 1,
+	executor := &engine.Engine{
+		Store:              store,
+		CompactionMaxBytes: 1,
 		Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 			t.Error("legacy run reached adapter build")
 			return nil, nil, errors.New("unexpected build")
@@ -320,7 +407,8 @@ func TestLegacyRunFailsBeforeBuildAndSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	saved, err := store.Get(context.Background(), "owner", run.ID)
-	if err != nil || saved.Status != durable.Failed || !strings.Contains(saved.Error, "no frozen pricing") || saved.TokensUsed != 0 {
+	if err != nil || saved.Status != durable.Failed || !strings.Contains(saved.Error, "no frozen pricing") ||
+		saved.TokensUsed != 0 {
 		t.Fatalf("run=%+v error=%v", saved, err)
 	}
 }

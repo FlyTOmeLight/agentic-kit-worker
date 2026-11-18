@@ -28,16 +28,25 @@ func TestSummaryAndModelUseSameFrozenPricing(t *testing.T) {
 	run := submit(t, store, "lookup", durable.ReadOnly, func(spec *durable.Spec) {
 		pricedSpec(2, 10)(spec)
 		spec.PricingSnapshot.CachedInputPerMillion = pricePointer(0.5)
-		spec.History = []durable.Message{{Role: "user", Content: "previous question"}, {Role: "assistant", Content: "previous answer"}}
+		spec.History = []durable.Message{
+			{Role: "user", Content: "previous question"},
+			{Role: "assistant", Content: "previous answer"},
+		}
 	})
 	claimed := getClaim(t, store)
-	usage := &schema.TokenUsage{PromptTokens: 1_000_000, CompletionTokens: 100_000, TotalTokens: 1_100_000,
-		PromptTokenDetails: schema.PromptTokenDetails{CachedTokens: 500_000}}
+	usage := &schema.TokenUsage{
+		PromptTokens: 1_000_000, CompletionTokens: 100_000, TotalTokens: 1_100_000,
+		PromptTokenDetails: schema.PromptTokenDetails{CachedTokens: 500_000},
+	}
 	models, summaries := 0, 0
-	executor := &engine.Engine{Store: store, CompactionMaxBytes: 1,
+	executor := &engine.Engine{
+		Store:              store,
+		CompactionMaxBytes: 1,
 		Summarizer: summaryFunc(func(summaryCtx context.Context, input engine.SummaryInput) (string, error) {
 			summaries++
-			if !input.Spec.PricingFrozen || input.Spec.PricingSnapshot == nil || input.Spec.PricingSnapshot.Model != input.Spec.Model.Name || input.Spec.PricingSnapshot.InputPerMillion != 2 {
+			if !input.Spec.PricingFrozen || input.Spec.PricingSnapshot == nil ||
+				input.Spec.PricingSnapshot.Model != input.Spec.Model.Name ||
+				input.Spec.PricingSnapshot.InputPerMillion != 2 {
 				t.Fatalf("summary did not receive frozen pricing: %+v", input.Spec)
 			}
 			return "previous work summary", input.RecordUsage(summaryCtx, usage, 1_100_000)
@@ -45,7 +54,11 @@ func TestSummaryAndModelUseSameFrozenPricing(t *testing.T) {
 		Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 			return &fakeModel{generate: func(context.Context, []*schema.Message) (*schema.Message, error) {
 				models++
-				return &schema.Message{Role: schema.Assistant, Content: "done", ResponseMeta: &schema.ResponseMeta{Usage: usage}}, nil
+				return &schema.Message{
+					Role:         schema.Assistant,
+					Content:      "done",
+					ResponseMeta: &schema.ResponseMeta{Usage: usage},
+				}, nil
 			}}, map[string]engine.Binding{"lookup": {Policy: durable.ReadOnly, Tool: &fakeTool{name: "lookup"}}}, nil
 		},
 	}
@@ -53,17 +66,26 @@ func TestSummaryAndModelUseSameFrozenPricing(t *testing.T) {
 		t.Fatal(err)
 	}
 	saved, err := store.Get(ctx, "owner", run.ID)
-	if err != nil || saved.Status != durable.Completed || models != 1 || summaries != 1 || saved.TokensUsed != 2_200_000 || saved.CostUSD != 4.5 {
+	if err != nil || saved.Status != durable.Completed || models != 1 || summaries != 1 ||
+		saved.TokensUsed != 2_200_000 ||
+		saved.CostUSD != 4.5 {
 		t.Fatalf("run=%+v models=%d summaries=%d error=%v", saved, models, summaries, err)
 	}
 	var records []struct {
 		Call    string
 		CostUSD float64
 	}
-	if err := store.DB().Table("durable_usage").Where("run_id = ?", run.ID).Order("call").Find(&records).Error; err != nil {
+	if err := store.DB().
+		Table("durable_usage").
+		Where("run_id = ?", run.ID).
+		Order("call").
+		Find(&records).
+		Error; err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 2 || records[0].Call != "model" || records[1].Call != "summary" || records[0].CostUSD != 2.25 || records[1].CostUSD != 2.25 {
+	if len(records) != 2 || records[0].Call != "model" || records[1].Call != "summary" ||
+		records[0].CostUSD != 2.25 ||
+		records[1].CostUSD != 2.25 {
 		t.Fatalf("usage=%+v", records)
 	}
 }
@@ -109,7 +131,11 @@ func TestCompactionProjectionCompletes(t *testing.T) {
 			input.Messages[0].ToolCalls[0].ID != "turn_1_tool_0" {
 			return "", fmt.Errorf("unexpected summary prefix: %+v", input)
 		}
-		if err := input.RecordUsage(summaryCtx, &schema.TokenUsage{PromptTokens: 12, CompletionTokens: 5, TotalTokens: 17}, 17); err != nil {
+		if err := input.RecordUsage(
+			summaryCtx,
+			&schema.TokenUsage{PromptTokens: 12, CompletionTokens: 5, TotalTokens: 17},
+			17,
+		); err != nil {
 			return "", err
 		}
 		return "Confirmed facts: first batch completed; continue lookup.", nil
@@ -309,7 +335,11 @@ func TestCompactionFailureRetriesWithoutMovingBoundary(t *testing.T) {
 	summaries, models := 0, 0
 	summarizer := summaryFunc(func(summaryCtx context.Context, input engine.SummaryInput) (string, error) {
 		summaries++
-		if err := input.RecordUsage(summaryCtx, &schema.TokenUsage{PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6}, 6); err != nil {
+		if err := input.RecordUsage(
+			summaryCtx,
+			&schema.TokenUsage{PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6},
+			6,
+		); err != nil {
 			return "", err
 		}
 		if summaries == 1 {
@@ -389,7 +419,11 @@ func TestCompactionRecordedUsageSurvivesSummaryError(t *testing.T) {
 		summaries++
 		// Usage is recorded, then the summary call fails. Consumption is
 		// known, so the run must not be blocked or double-charged.
-		if err := input.RecordUsage(summaryCtx, &schema.TokenUsage{PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6}, 6); err != nil {
+		if err := input.RecordUsage(
+			summaryCtx,
+			&schema.TokenUsage{PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6},
+			6,
+		); err != nil {
 			return "", err
 		}
 		return "", errors.New("summary response stream reset")
@@ -484,7 +518,11 @@ func TestCompactionIncludesFrozenHistory(t *testing.T) {
 		if len(input.Messages) != 2 || input.Messages[0].Content != "old question" {
 			return "", errors.New("history was not included in summary")
 		}
-		return "Previous conversation summary", input.RecordUsage(summaryCtx, &schema.TokenUsage{PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6}, 6)
+		return "Previous conversation summary", input.RecordUsage(
+			summaryCtx,
+			&schema.TokenUsage{PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6},
+			6,
+		)
 	})
 	build := func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 		return &fakeModel{generate: func(_ context.Context, input []*schema.Message) (*schema.Message, error) {
@@ -543,10 +581,16 @@ func TestCompactionUsageGovernance(t *testing.T) {
 			ctx := context.Background()
 			run := submit(t, store, "lookup", durable.ReadOnly)
 			goal, _, err := store.CreateGoal(ctx, durable.Goal{
-				OwnerID: "owner", SessionID: run.SessionID,
-				RequestKey: "summary-usage", RequestHash: "summary-usage",
-				Objective: "complete task", Evaluator: durable.EvaluatorSpec{Kind: durable.EvaluatorNone},
-				Budget: durable.BudgetSpec{MaxTokens: testCase.limit, MaxCostUSD: testCase.costLimit},
+				OwnerID:     "owner",
+				SessionID:   run.SessionID,
+				RequestKey:  "summary-usage",
+				RequestHash: "summary-usage",
+				Objective:   "complete task",
+				Evaluator:   durable.EvaluatorSpec{Kind: durable.EvaluatorNone},
+				Budget: durable.BudgetSpec{
+					MaxTokens:  testCase.limit,
+					MaxCostUSD: testCase.costLimit,
+				},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -555,45 +599,76 @@ func TestCompactionUsageGovernance(t *testing.T) {
 				t.Fatal(err)
 			}
 			claimed := getClaim(t, store)
-			claimed.Spec.History = []durable.Message{{Role: "user", Content: "previous question"}, {Role: "assistant", Content: "previous answer"}}
+			claimed.Spec.History = []durable.Message{
+				{Role: "user", Content: "previous question"},
+				{Role: "assistant", Content: "previous answer"},
+			}
 			pricedSpec(1, 1)(&claimed.Spec)
 			if testCase.precharged > 0 {
-				if err = store.RecordUsage(ctx, claimed.Lease(), 0, "model", testCase.precharged, json.RawMessage(`{"version":3}`)); err != nil {
+				if err = store.RecordUsage(
+					ctx,
+					claimed.Lease(),
+					0,
+					"model",
+					testCase.precharged,
+					json.RawMessage(`{"version":3}`),
+				); err != nil {
 					t.Fatal(err)
 				}
 			}
 			models, summaries := 0, 0
 			executor := &engine.Engine{
-				Store: store, CompactionMaxBytes: 1,
-				Summarizer: summaryFunc(func(summaryCtx context.Context, input engine.SummaryInput) (string, error) {
-					summaries++
-					if input.RecordUsage == nil {
-						t.Error("summary usage callback missing")
-						return "", errors.New("missing callback")
-					}
-					if testCase.tokens > 0 {
-						summaryUsage := &schema.TokenUsage{
-							PromptTokens:     int(testCase.tokens) - 1,
-							CompletionTokens: 1,
-							TotalTokens:      int(testCase.tokens),
+				Store:              store,
+				CompactionMaxBytes: 1,
+				Summarizer: summaryFunc(
+					func(summaryCtx context.Context, input engine.SummaryInput) (string, error) {
+						summaries++
+						if input.RecordUsage == nil {
+							t.Error("summary usage callback missing")
+							return "", errors.New("missing callback")
 						}
-						if testCase.recordFails {
-							canceled, cancel := context.WithCancel(summaryCtx)
-							cancel()
-							_ = input.RecordUsage(canceled, summaryUsage, testCase.tokens)
-							return "ignored recording error", nil
+						if testCase.tokens > 0 {
+							summaryUsage := &schema.TokenUsage{
+								PromptTokens:     int(testCase.tokens) - 1,
+								CompletionTokens: 1,
+								TotalTokens:      int(testCase.tokens),
+							}
+							if testCase.recordFails {
+								canceled, cancel := context.WithCancel(summaryCtx)
+								cancel()
+								_ = input.RecordUsage(
+									canceled,
+									summaryUsage,
+									testCase.tokens,
+								)
+								return "ignored recording error", nil
+							}
+							if usageErr := input.RecordUsage(
+								summaryCtx,
+								summaryUsage,
+								testCase.tokens,
+							); usageErr != nil {
+								return "", usageErr
+							}
 						}
-						if usageErr := input.RecordUsage(summaryCtx, summaryUsage, testCase.tokens); usageErr != nil {
-							return "", usageErr
-						}
-					}
-					return "earlier conversation summary", testCase.summaryErr
-				}),
+						return "earlier conversation summary", testCase.summaryErr
+					},
+				),
 				Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
-					return &fakeModel{generate: func(context.Context, []*schema.Message) (*schema.Message, error) {
-						models++
-						return &schema.Message{Role: schema.Assistant, Content: "done", ResponseMeta: &schema.ResponseMeta{Usage: &schema.TokenUsage{}}}, nil
-					}}, map[string]engine.Binding{"lookup": {Policy: durable.ReadOnly, Tool: &fakeTool{name: "lookup"}}}, nil
+					return &fakeModel{
+						generate: func(context.Context, []*schema.Message) (*schema.Message, error) {
+							models++
+							return &schema.Message{
+								Role:    schema.Assistant,
+								Content: "done",
+								ResponseMeta: &schema.ResponseMeta{
+									Usage: &schema.TokenUsage{},
+								},
+							}, nil
+						},
+					}, map[string]engine.Binding{
+						"lookup": {Policy: durable.ReadOnly, Tool: &fakeTool{name: "lookup"}},
+					}, nil
 				},
 			}
 			if err = executor.Execute(ctx, claimed); err != nil {
@@ -610,8 +685,15 @@ func TestCompactionUsageGovernance(t *testing.T) {
 			if testCase.wantBlocked {
 				wantStatus = durable.Blocked
 			}
-			if saved.Status != wantStatus || models != testCase.wantModels || summaries != testCase.wantSummaries {
-				t.Fatalf("status=%s models=%d summaries=%d run=%+v", saved.Status, models, summaries, saved)
+			if saved.Status != wantStatus || models != testCase.wantModels ||
+				summaries != testCase.wantSummaries {
+				t.Fatalf(
+					"status=%s models=%d summaries=%d run=%+v",
+					saved.Status,
+					models,
+					summaries,
+					saved,
+				)
 			}
 			var state engine.State
 			if err = json.Unmarshal(saved.State, &state); err != nil {
@@ -621,11 +703,21 @@ func TestCompactionUsageGovernance(t *testing.T) {
 				t.Fatalf("summary calls=%d want=%d", state.SummaryCalls, testCase.wantSummaryCalls)
 			}
 			if testCase.wantBlocked {
-				if state.InflightModel == nil || state.InflightModel.Kind != "summary" || state.InflightModel.Sequence != 0 ||
-					state.Turn != 0 || saved.FirstKeptSeq != 0 || saved.CompactedSummary != "" {
+				if state.InflightModel == nil || state.InflightModel.Kind != "summary" ||
+					state.InflightModel.Sequence != 0 ||
+					state.Turn != 0 ||
+					saved.FirstKeptSeq != 0 ||
+					saved.CompactedSummary != "" {
 					t.Fatalf("unknown summary advanced execution: state=%+v run=%+v", state, saved)
 				}
-				if _, claimErr := store.Claim(ctx, "replacement", time.Minute); !errors.Is(claimErr, durable.ErrNoWork) {
+				if _, claimErr := store.Claim(
+					ctx,
+					"replacement",
+					time.Minute,
+				); !errors.Is(
+					claimErr,
+					durable.ErrNoWork,
+				) {
 					t.Fatalf("blocked summary was claimable: %v", claimErr)
 				}
 			}
@@ -633,7 +725,11 @@ func TestCompactionUsageGovernance(t *testing.T) {
 				Turn   int64
 				Tokens int64
 			}
-			if err = store.DB().Table("durable_usage").Where("run_id = ? AND call = ?", run.ID, "summary").Find(&usage).Error; err != nil {
+			if err = store.DB().
+				Table("durable_usage").
+				Where("run_id = ? AND call = ?", run.ID, "summary").
+				Find(&usage).
+				Error; err != nil {
 				t.Fatal(err)
 			}
 			if testCase.wantUsage == 0 {
@@ -652,10 +748,21 @@ func TestCompactionUsageGovernance(t *testing.T) {
 			}
 			wantTokens := testCase.precharged + testCase.wantUsage
 			if saved.TokensUsed != wantTokens || savedGoal.TokensUsed != wantTokens {
-				t.Fatalf("run tokens=%d goal tokens=%d want=%d", saved.TokensUsed, savedGoal.TokensUsed, wantTokens)
+				t.Fatalf(
+					"run tokens=%d goal tokens=%d want=%d",
+					saved.TokensUsed,
+					savedGoal.TokensUsed,
+					wantTokens,
+				)
 			}
-			if testCase.wantCost > 0 && (saved.CostUSD < testCase.wantCost-1e-12 || saved.CostUSD > testCase.wantCost+1e-12 || savedGoal.CostUSD < testCase.wantCost-1e-12 || savedGoal.CostUSD > testCase.wantCost+1e-12) {
-				t.Fatalf("run cost=%v goal cost=%v want=%v", saved.CostUSD, savedGoal.CostUSD, testCase.wantCost)
+			if testCase.wantCost > 0 &&
+				(saved.CostUSD < testCase.wantCost-1e-12 || saved.CostUSD > testCase.wantCost+1e-12 || savedGoal.CostUSD < testCase.wantCost-1e-12 || savedGoal.CostUSD > testCase.wantCost+1e-12) {
+				t.Fatalf(
+					"run cost=%v goal cost=%v want=%v",
+					saved.CostUSD,
+					savedGoal.CostUSD,
+					testCase.wantCost,
+				)
 			}
 			events, err := store.Events(ctx, "owner", run.ID, 0)
 			if err != nil {
@@ -677,7 +784,12 @@ func TestCompactionUsageGovernance(t *testing.T) {
 				}
 			}
 			if failures != testCase.wantFailures || (testCase.wantFailure != "" && !foundFailure) {
-				t.Fatalf("compaction failures=%d expected=%d failure recorded=%v", failures, testCase.wantFailures, foundFailure)
+				t.Fatalf(
+					"compaction failures=%d expected=%d failure recorded=%v",
+					failures,
+					testCase.wantFailures,
+					foundFailure,
+				)
 			}
 		})
 	}
@@ -712,7 +824,14 @@ func TestCompactionMergesPreviousSummaryAndPreservesModelFields(t *testing.T) {
 			input.Messages[0].ToolCalls[0].ID != fmt.Sprintf("turn_%d_tool_0", summaries) {
 			return "", fmt.Errorf("incorrect incremental summary: %+v", input)
 		}
-		return fmt.Sprintf("summary-%d", summaries), input.RecordUsage(summaryCtx, &schema.TokenUsage{PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6}, 6)
+		return fmt.Sprintf(
+				"summary-%d",
+				summaries,
+			), input.RecordUsage(
+				summaryCtx,
+				&schema.TokenUsage{PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6},
+				6,
+			)
 	})
 	build := func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 		return &fakeModel{generate: func(_ context.Context, input []*schema.Message) (*schema.Message, error) {

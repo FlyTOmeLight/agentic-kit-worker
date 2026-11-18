@@ -165,7 +165,8 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "RunBlocked") || !strings.Contains(string(body), "automatic replay is disabled") {
+	if !strings.Contains(string(body), "RunBlocked") ||
+		!strings.Contains(string(body), "automatic replay is disabled") {
 		t.Fatalf("missing durable block: %s", body)
 	}
 }
@@ -244,7 +245,7 @@ RunMode = "release"
 [FakeAuth]
 TenantID = "tenant"
 UserID = "owner"
-[Artifact]
+[AgentArtifact]
 Endpoint = %q
 Timeout = 5000
 [DB]

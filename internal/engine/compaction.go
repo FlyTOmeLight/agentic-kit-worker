@@ -42,9 +42,20 @@ func (s *execution) projectContext(ctx context.Context, original []*schema.Messa
 		history = nil
 		for _, group := range s.snapshot.Materials.History {
 			for _, message := range group.Messages {
-				saved := durable.Message{Role: string(message.Role), Content: message.Content, ToolCallID: message.ToolCallID}
+				saved := durable.Message{
+					Role:       string(message.Role),
+					Content:    message.Content,
+					ToolCallID: message.ToolCallID,
+				}
 				for _, call := range message.ToolCalls {
-					saved.ToolCalls = append(saved.ToolCalls, durable.ToolCall{ID: call.ID, Name: call.Name, Arguments: call.Arguments})
+					saved.ToolCalls = append(
+						saved.ToolCalls,
+						durable.ToolCall{
+							ID:        call.ID,
+							Name:      call.Name,
+							Arguments: call.Arguments,
+						},
+					)
 				}
 				history = append(history, saved)
 			}
@@ -181,7 +192,15 @@ func (s *execution) projectContext(ctx context.Context, original []*schema.Messa
 		call := s.state.SummaryCalls
 		s.state.SummaryCalls++
 		s.state.InflightModel = nil
-		usageErr = s.store.RecordUsageWithCost(usageCtx, s.run.Lease(), call, "summary", tokens, cost, s.encode())
+		usageErr = s.store.RecordUsageWithCost(
+			usageCtx,
+			s.run.Lease(),
+			call,
+			"summary",
+			tokens,
+			cost,
+			s.encode(),
+		)
 		if usageErr != nil {
 			s.state = previousState
 			return usageErr

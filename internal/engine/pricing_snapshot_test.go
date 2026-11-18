@@ -35,15 +35,24 @@ func TestFrozenPricingValidation(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			spec := durable.Spec{
-				PricingFrozen:   true,
-				Model:           durable.ModelSpec{Name: "model", BaseURL: "https://provider/v1"},
-				PricingSnapshot: &executionspec.PricingSnapshot{Version: "v1", Model: "model", BaseURL: "https://provider/v1", InputPerMillion: 1, OutputPerMillion: 2},
+				PricingFrozen: true,
+				Model:         durable.ModelSpec{Name: "model", BaseURL: "https://provider/v1"},
+				PricingSnapshot: &executionspec.PricingSnapshot{
+					Version:          "v1",
+					Model:            "model",
+					BaseURL:          "https://provider/v1",
+					InputPerMillion:  1,
+					OutputPerMillion: 2,
+				},
 			}
 			if test.change != nil {
 				test.change(&spec)
 			}
 			run := &execution{run: &durable.Run{Spec: spec}}
-			if err := run.checkPricing(context.Background()); (err != nil) != test.wantErr || (err != nil && !errors.Is(err, ErrModelPricingUnavailable)) {
+			if err := run.checkPricing(
+				context.Background(),
+			); (err != nil) != test.wantErr ||
+				(err != nil && !errors.Is(err, ErrModelPricingUnavailable)) {
 				t.Fatalf("error=%v wantErr=%v", err, test.wantErr)
 			}
 		})

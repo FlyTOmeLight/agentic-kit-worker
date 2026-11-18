@@ -8,7 +8,12 @@ import (
 	"github.com/cloudwego/eino/components/model"
 )
 
-func ModelBoundaryForTest(t *testing.T, store *durable.Store, run *durable.Run, base model.BaseChatModel) model.BaseChatModel {
+func ModelBoundaryForTest(
+	t *testing.T,
+	store *durable.Store,
+	run *durable.Run,
+	base model.BaseChatModel,
+) model.BaseChatModel {
 	t.Helper()
 	execution := &execution{store: store, run: run}
 	if err := json.Unmarshal(run.State, &execution.state); err != nil {
