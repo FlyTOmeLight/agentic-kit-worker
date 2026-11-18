@@ -492,6 +492,43 @@ func TestRecordedModelResponseSurvivesTakeover(t *testing.T) {
 	}
 }
 
+func TestRecordDecisionFailureKeepsBilledResponse(t *testing.T) {
+	store, _ := testDB(t)
+	ctx := context.Background()
+	run := submit(t, store, "lookup", durable.ReadOnly)
+	claimed := getClaim(t, store)
+
+	state, setErr := engine.SetDecisionCheckpointForTest(t, store, claimed)
+	if setErr == nil {
+		t.Fatal("canceled decision commit unexpectedly succeeded")
+	}
+	if state.PendingModel == nil || len(state.PendingModel.ToolCalls) != 1 {
+		t.Fatalf("in-memory billed response was discarded: %+v", state)
+	}
+
+	saved, err := store.Get(ctx, "owner", run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var savedState engine.State
+	if err = json.Unmarshal(saved.State, &savedState); err != nil {
+		t.Fatal(err)
+	}
+	if savedState.PendingModel == nil || len(savedState.PendingModel.ToolCalls) != 1 ||
+		saved.TokensUsed != 7 {
+		t.Fatalf("persisted billed response was discarded: run=%+v state=%+v", saved, savedState)
+	}
+	var usage int64
+	if err = store.DB().Table("durable_usage").
+		Where("run_id = ? AND turn = ? AND call = ?", run.ID, 0, "model").
+		Count(&usage).Error; err != nil {
+		t.Fatal(err)
+	}
+	if usage != 1 {
+		t.Fatalf("model usage rows=%d, want 1", usage)
+	}
+}
+
 func TestModelUsageChargesFrozenPricing(t *testing.T) {
 	for _, scenario := range []string{"priced", "model mismatch"} {
 		t.Run(scenario, func(t *testing.T) {

@@ -217,10 +217,10 @@ func (s *execution) projectContext(ctx context.Context, original []*schema.Messa
 	if errors.Is(summaryErr, durable.ErrUsageBudgetExceeded) || errors.Is(summaryErr, ErrModelUsageUnavailable) {
 		return nil, summaryErr
 	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
 	if s.state.InflightModel != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, errors.Join(ErrModelUsageUnavailable, summaryErr)
 	}
 	if summaryErr == nil && strings.TrimSpace(summary) == "" {
@@ -238,7 +238,9 @@ func (s *execution) projectContext(ctx context.Context, original []*schema.Messa
 	} else if len(projection.Messages) > 0 {
 		firstKeptSeq = projection.Messages[len(projection.Messages)-1].Seq + 1
 	}
-	if err = s.store.CompactRun(ctx, s.run.Lease(), summary, firstKeptSeq); err != nil {
+	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer persistCancel()
+	if err = s.store.CompactRun(persistCtx, s.run.Lease(), summary, firstKeptSeq); err != nil {
 		return nil, err
 	}
 	return s.contextInput(summary, originals[cut:], original), nil
