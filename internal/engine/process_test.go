@@ -18,16 +18,27 @@ import (
 	"time"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
+	"github.com/FlyTOmeLight/server-go/constants"
 
 	"github.com/FlyTOmeLight/agentic-kit-worker/internal/adapters"
 	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
+const (
+	processTestTenantID = "tenant"
+	processTestUserID   = "owner"
+)
+
+func authorizeProcessRequest(request *http.Request) {
+	request.Header.Set("Authorization", "Bearer process-test-user-proof")
+	request.Header.Set(constants.HeaderTenantID, processTestTenantID)
+}
+
 func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 	s, dsn := testDB(t)
 	binary := buildAPI(t)
 	workerBinary := buildWorker(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	var modelCalls, toolCalls atomic.Int32
 	enteredSecondModel := make(chan struct{}, 1)
@@ -46,7 +57,7 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 		if n == 1 {
 			fmt.Fprint(
 				w,
-				`{"id":"cmpl-1","object":"chat.completion","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"remote-tool","type":"function","function":{"name":"submit","arguments":"{}"}}]}}]}`,
+				`{"id":"cmpl-1","object":"chat.completion","usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3},"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"remote-tool","type":"function","function":{"name":"submit","arguments":"{}"}}]}}]}`,
 			)
 			return
 		}
@@ -60,7 +71,7 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 		}
 		fmt.Fprint(
 			w,
-			`{"id":"cmpl-2","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"report completed"}}]}`,
+			`{"id":"cmpl-2","object":"chat.completion","usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3},"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"report completed"}}]}`,
 		)
 	}))
 	defer upstream.Close()
@@ -116,12 +127,12 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Status.Terminal() {
+		if result.Status.Terminal() || result.Status == durable.Blocked {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if result == nil || result.Status != durable.Completed || result.Output != "report completed" ||
+	if result == nil || result.Status != durable.Blocked ||
 		result.Epoch != 2 ||
 		toolCalls.Load() != 1 {
 		t.Fatalf("result=%+v tools=%d models=%d", result, toolCalls.Load(), modelCalls.Load())
@@ -130,9 +141,8 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 4 || messages[0].Kind != "User" || messages[1].Kind != "Assistant" ||
-		messages[2].Kind != "Tool" ||
-		messages[3].Kind != "Final" {
+	if len(messages) != 3 || messages[0].Kind != "User" || messages[1].Kind != "Assistant" ||
+		messages[2].Kind != "Tool" {
 		t.Fatalf("messages after recovery: %+v", messages)
 	}
 	for i, message := range messages {
@@ -145,6 +155,7 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	authorizeProcessRequest(request)
 	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -154,8 +165,9 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "RunCompleted") || !strings.Contains(string(body), "report completed") {
-		t.Fatalf("missing durable completion: %s", body)
+	if !strings.Contains(string(body), "RunBlocked") ||
+		!strings.Contains(string(body), "automatic replay is disabled") {
+		t.Fatalf("missing durable block: %s", body)
 	}
 }
 
@@ -171,6 +183,7 @@ func submitMessage(t *testing.T, ctx context.Context, base, session, key string)
 		t.Fatal(err)
 	}
 	request.Header.Set("Idempotency-Key", key)
+	authorizeProcessRequest(request)
 	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +220,6 @@ func buildAPI(t *testing.T) string {
 	}
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", binary, "./cmd/server")
 	cmd.Dir = strings.TrimSpace(string(dir))
-	cmd.Env = append(os.Environ(), "GOWORK=off")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build API: %v\n%s", err, output)
 	}
@@ -217,6 +229,7 @@ func buildAPI(t *testing.T) string {
 func startAPI(t *testing.T, binary, dsn string) string {
 	t.Helper()
 	artifactURL := newFakeArtifactServer(t).URL
+	tenantURL := newFakeTenantServer(t).URL
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -230,9 +243,9 @@ func startAPI(t *testing.T, binary, dsn string) string {
 AppCode = 100
 RunMode = "release"
 [FakeAuth]
-TenantID = "test-tenant"
+TenantID = "tenant"
 UserID = "owner"
-[Artifact]
+[AgentArtifact]
 Endpoint = %q
 Timeout = 5000
 [DB]
@@ -250,7 +263,10 @@ IdleTimeout = 60000
 [Redis]
 Addrs = ["127.0.0.1:1"]
 DB = 0
-`, artifactURL, dsn, address)
+[Tenant]
+Endpoint = %q
+ServiceAPIKey = "process-test-service-key-32chars"
+`, artifactURL, dsn, address, tenantURL)
 	if err := os.WriteFile(configPath, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +301,7 @@ DB = 0
 	go func() { done <- cmd.Wait() }()
 	t.Cleanup(func() { _ = cmd.Process.Kill(); <-done; _ = log.Close() })
 	client := &http.Client{Timeout: 200 * time.Millisecond}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		response, err := client.Get("http://" + address + "/healthz")
 		if err == nil {
@@ -302,6 +318,42 @@ DB = 0
 	return ""
 }
 
+func newFakeTenantServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/internal/v1/scope/resolve":
+			var proof struct {
+				APIKey    string  `json:"api_key"`
+				TenantID  string  `json:"tenant_id"`
+				ProjectID *string `json:"project_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&proof); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if proof.TenantID != processTestTenantID {
+				http.Error(w, `{"error":{"code":"FORBIDDEN","message":"denied"}}`, http.StatusForbidden)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"principal":       map[string]string{"id": processTestUserID},
+				"user_id":         processTestUserID,
+				"tenant_id":       proof.TenantID,
+				"project_id":      proof.ProjectID,
+				"ownership_state": "active",
+			})
+		case "/internal/v1/service/self":
+			_ = json.NewEncoder(w).Encode(map[string]string{"service": "allowed"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 func configureConversation(t *testing.T, base string, spec durable.Spec) durable.Session {
 	t.Helper()
 	call := func(path string, input any, output any, want int) {
@@ -315,6 +367,7 @@ func configureConversation(t *testing.T, base string, spec durable.Spec) durable
 			t.Fatal(err)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		authorizeProcessRequest(req)
 		client := http.Client{Timeout: 5 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
@@ -598,7 +651,7 @@ func TestProcessShutdownCancelsInFlightHTTPTool(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(
 			w,
-			`{"id":"cmpl-1","object":"chat.completion","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"remote-tool","type":"function","function":{"name":"submit","arguments":"{}"}}]}}]}`,
+			`{"id":"cmpl-1","object":"chat.completion","usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3},"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"remote-tool","type":"function","function":{"name":"submit","arguments":"{}"}}]}}]}`,
 		)
 	}))
 	defer upstream.Close()

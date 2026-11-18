@@ -15,13 +15,19 @@ type SummaryInput struct {
 	Spec            durable.Spec
 	PreviousSummary string
 	Messages        []durable.Message
+	RecordUsage     func(context.Context, *schema.TokenUsage, int64) error
 }
+
+var ErrModelUsageUnavailable = errors.New("model token usage unavailable")
 
 type Summarizer interface {
 	Summarize(context.Context, SummaryInput) (string, error)
 }
 
 func (s *execution) projectContext(ctx context.Context, original []*schema.Message) ([]*schema.Message, error) {
+	if err := s.checkPricing(ctx); err != nil {
+		return nil, err
+	}
 	projection, err := s.store.CompactionContext(ctx, s.run.Lease())
 	if err != nil {
 		return nil, err
@@ -29,13 +35,42 @@ func (s *execution) projectContext(ctx context.Context, original []*schema.Messa
 	var messages []durable.SessionMessage
 	var originals []*schema.Message
 	var batchStarts []int
+	history := s.run.Spec.History
 	baseCount := len(s.run.Spec.History) + 2
-	if len(original) < baseCount || original[0].Role != schema.System ||
-		original[baseCount-1].Role != schema.User || original[baseCount-1].Content != s.run.Spec.Query {
+	if s.snapshot != nil {
+		baseCount = 1
+		history = nil
+		for _, group := range s.snapshot.Materials.History {
+			for _, message := range group.Messages {
+				saved := durable.Message{
+					Role:       string(message.Role),
+					Content:    message.Content,
+					ToolCallID: message.ToolCallID,
+				}
+				for _, call := range message.ToolCalls {
+					saved.ToolCalls = append(
+						saved.ToolCalls,
+						durable.ToolCall{
+							ID:        call.ID,
+							Name:      call.Name,
+							Arguments: call.Arguments,
+						},
+					)
+				}
+				history = append(history, saved)
+			}
+		}
+	}
+	if len(original) < baseCount || original[baseCount-1] == nil ||
+		original[baseCount-1].Role != schema.User || original[baseCount-1].Content != s.run.Spec.Query ||
+		(s.snapshot == nil && (original[0] == nil || original[0].Role != schema.System)) {
 		return nil, errors.New("model input does not match frozen conversation")
 	}
 	assistants, results := map[string]*schema.Message{}, map[string]*schema.Message{}
 	for _, message := range original[baseCount:] {
+		if message == nil {
+			return nil, errors.New("nil message in model input")
+		}
 		switch {
 		case message.Role == schema.Assistant && len(message.ToolCalls) > 0:
 			id := message.ToolCalls[0].ID
@@ -105,13 +140,20 @@ func (s *execution) projectContext(ctx context.Context, original []*schema.Messa
 	if s.summarizer == nil || s.compactionMaxBytes <= 0 {
 		return input, nil
 	}
-	canCompactHistory := projection.Summary == "" && len(s.run.Spec.History) > 0
+	canCompactHistory := projection.Summary == "" && len(history) > 0
 	if len(batchStarts) <= 2 && !canCompactHistory {
 		return input, nil
 	}
 	data, err := json.Marshal(input)
 	if err != nil {
 		return nil, err
+	}
+	if s.snapshot != nil && canCompactHistory {
+		historyData, historyErr := json.Marshal(history)
+		if historyErr != nil {
+			return nil, historyErr
+		}
+		data = append(data, historyData...)
 	}
 	nearTurnLimit := s.state.Turn >= s.run.Spec.MaxTurns*4/5
 	if len(data) < s.compactionMaxBytes && !nearTurnLimit {
@@ -123,16 +165,63 @@ func (s *execution) projectContext(ctx context.Context, original []*schema.Messa
 	}
 	request := SummaryInput{Spec: s.run.Spec, PreviousSummary: projection.Summary}
 	if projection.Summary == "" {
-		request.Messages = append(request.Messages, s.run.Spec.History...)
+		request.Messages = append(request.Messages, history...)
 	}
 	for _, message := range messages[:cut] {
 		request.Messages = append(request.Messages, message.Message)
 	}
+	if err = s.store.CheckUsageBudget(ctx, s.run.Lease()); err != nil {
+		return nil, err
+	}
+	s.state.InflightModel = &InflightModel{Kind: "summary", Sequence: s.state.SummaryCalls}
+	if err = s.store.SaveState(ctx, s.run.Lease(), s.encode()); err != nil {
+		s.state.InflightModel = nil
+		return nil, err
+	}
+	var usageErr error
+	request.RecordUsage = func(usageCtx context.Context, usage *schema.TokenUsage, tokens int64) error {
+		if usage == nil {
+			usageErr = ErrModelUsageUnavailable
+			return usageErr
+		}
+		cost, costErr := s.usageCost(usage)
+		previousState := s.state
+		if costErr != nil {
+			s.state.PricingFailure = costErr.Error()
+		}
+		call := s.state.SummaryCalls
+		s.state.SummaryCalls++
+		s.state.InflightModel = nil
+		usageErr = s.store.RecordUsageWithCost(
+			usageCtx,
+			s.run.Lease(),
+			call,
+			"summary",
+			tokens,
+			cost,
+			s.encode(),
+		)
+		if usageErr != nil {
+			s.state = previousState
+			return usageErr
+		}
+		usageErr = costErr
+		return usageErr
+	}
 	summaryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	summary, summaryErr := s.summarizer.Summarize(summaryCtx, request)
 	cancel()
+	if usageErr != nil {
+		return nil, usageErr
+	}
+	if errors.Is(summaryErr, durable.ErrUsageBudgetExceeded) || errors.Is(summaryErr, ErrModelUsageUnavailable) {
+		return nil, summaryErr
+	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
+	}
+	if s.state.InflightModel != nil {
+		return nil, errors.Join(ErrModelUsageUnavailable, summaryErr)
 	}
 	if summaryErr == nil && strings.TrimSpace(summary) == "" {
 		summaryErr = errors.New("summarizer returned an empty summary")
@@ -156,6 +245,10 @@ func (s *execution) projectContext(ctx context.Context, original []*schema.Messa
 }
 
 func (s *execution) contextInput(summary string, messages, original []*schema.Message) []*schema.Message {
+	if s.snapshot != nil {
+		s.run.CompactedSummary = summary
+		return append([]*schema.Message{original[0]}, messages...)
+	}
 	input := []*schema.Message{original[0]}
 	if summary == "" {
 		input = append(input, original[1:len(s.run.Spec.History)+1]...)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/execution"
+	"gorm.io/gorm"
 )
 
 // createPublishedAgentFixture writes the local asset rows needed by run
@@ -28,8 +29,8 @@ func createPublishedAgentFixture(
 	}
 	if err = s.DB().WithContext(ctx).Exec(
 		`INSERT INTO agent
-		 (id, owner_id, name, draft, revision, published_revision, published_version, created_at, updated_at)
-		 VALUES (?, ?, ?, CAST(? AS jsonb), 1, 1, 1, clock_timestamp(), clock_timestamp())`,
+		 (id, tenant_id, project_id, owner_id, name, draft, revision, published_revision, published_version, created_at, updated_at)
+		 VALUES (?, 'tenant', '', ?, ?, CAST(? AS jsonb), 1, 1, 1, clock_timestamp(), clock_timestamp())`,
 		agentID, owner, name, string(draft),
 	).Error; err != nil {
 		t.Fatal(err)
@@ -53,6 +54,7 @@ func submitChatFixture(
 	query string,
 	ttl time.Duration,
 	maxAttempts int,
+	configureSpec ...func(*durable.Spec),
 ) (*durable.Session, *durable.Run) {
 	t.Helper()
 	ctx := context.Background()
@@ -74,9 +76,29 @@ func submitChatFixture(
 		Kind:        execution.SubmitChat,
 		SessionID:   session.ID,
 		Query:       query,
-	}, durable.PrepareChatSubmission(config, agentID, version))
+	}, func(ctx context.Context, tx *gorm.DB, facts execution.SubmissionFacts) (execution.PreparedSubmission, error) {
+		prepared, err := durable.PrepareChatSubmission(config, agentID, version, nil)(ctx, tx, facts)
+		if err != nil {
+			return prepared, err
+		}
+		prepared.Spec.PricingFrozen = true
+		for _, configure := range configureSpec {
+			configure(&prepared.Spec)
+		}
+		return prepared, nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return session, run
+}
+
+func pricedSpec(input, output float64) func(*durable.Spec) {
+	return func(spec *durable.Spec) {
+		spec.PricingFrozen = true
+		spec.PricingSnapshot = &execution.PricingSnapshot{
+			Version: "test-v1", Model: spec.Model.Name, BaseURL: spec.Model.BaseURL,
+			InputPerMillion: input, OutputPerMillion: output,
+		}
+	}
 }

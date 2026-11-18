@@ -416,8 +416,8 @@ func submitTakeoverRun(t *testing.T, store *durable.Store) *durable.Run {
 	db := store.DB()
 	agentID, sessionID, runID := durable.NewID(), durable.NewID(), durable.NewID()
 	if err := db.WithContext(ctx).Exec(
-		`INSERT INTO agent (id, owner_id, name, draft, revision, published_revision, published_version, created_at, updated_at)
-		 VALUES (?, 'owner', 'takeover', '{}', 1, 1, 1, clock_timestamp(), clock_timestamp())`,
+		`INSERT INTO agent (id, tenant_id, project_id, owner_id, name, draft, revision, published_revision, published_version, created_at, updated_at)
+		 VALUES (?, 'tenant', '', 'owner', 'takeover', '{}', 1, 1, 1, clock_timestamp(), clock_timestamp())`,
 		agentID,
 	).
 		Error; err != nil {
@@ -431,17 +431,18 @@ func submitTakeoverRun(t *testing.T, store *durable.Store) *durable.Run {
 		t.Fatal(err)
 	}
 	if err := db.WithContext(ctx).Exec(
-		`INSERT INTO agent_session (id, owner_id, agent_id, title, created_at, updated_at)
-		 VALUES (?, 'owner', ?, 'takeover', clock_timestamp(), clock_timestamp())`,
+		`INSERT INTO agent_session (id, tenant_id, project_id, owner_id, agent_id, title, created_at, updated_at)
+		 VALUES (?, 'tenant', '', 'owner', ?, 'takeover', clock_timestamp(), clock_timestamp())`,
 		sessionID, agentID,
-	).Error; err != nil {
+	).
+		Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := db.WithContext(ctx).Exec(
 		`INSERT INTO durable_run
-		 (id, owner_id, session_id, request_key, request_hash, spec, state, status,
+		 (id, tenant_id, project_id, owner_id, session_id, request_key, request_hash, spec, state, status,
 		  deadline, max_attempts)
-		 VALUES (?, 'owner', ?, ?, 'hash', '{}', '{}', 'Queued',
+		 VALUES (?, 'tenant', '', 'owner', ?, ?, 'hash', '{}', '{}', 'Queued',
 		         clock_timestamp() + interval '1 hour', 1)`,
 		runID, sessionID, "takeover-"+runID,
 	).Error; err != nil {

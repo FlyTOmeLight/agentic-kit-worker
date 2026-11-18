@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,7 +68,16 @@ type fakeModel struct {
 }
 
 func (m *fakeModel) Generate(ctx context.Context, in []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-	return m.generate(ctx, in)
+	message, err := m.generate(ctx, in)
+	if message != nil {
+		if message.ResponseMeta == nil {
+			message.ResponseMeta = &schema.ResponseMeta{}
+		}
+		if message.ResponseMeta.Usage == nil {
+			message.ResponseMeta.Usage = &schema.TokenUsage{TotalTokens: 1}
+		}
+	}
+	return message, err
 }
 
 func (m *fakeModel) Stream(
@@ -93,12 +103,15 @@ func (t *fakeTool) InvokableRun(ctx context.Context, args string, _ ...tool.Opti
 	return t.invoke(ctx, args)
 }
 
+var toolCallSeq atomic.Int64
+
 func toolReply(name string) *schema.Message {
+	id := fmt.Sprintf("tool_reply_%d", toolCallSeq.Add(1))
 	return &schema.Message{
 		Role: schema.Assistant,
 		ToolCalls: []schema.ToolCall{
 			{
-				ID:       "provider_id",
+				ID:       id,
 				Type:     "function",
 				Function: schema.FunctionCall{Name: name, Arguments: `{"question":"which version?"}`},
 			},
@@ -106,7 +119,13 @@ func toolReply(name string) *schema.Message {
 	}
 }
 
-func submit(t *testing.T, s *durable.Store, name string, policy durable.Policy) *durable.Run {
+func submit(
+	t *testing.T,
+	s *durable.Store,
+	name string,
+	policy durable.Policy,
+	configureSpec ...func(*durable.Spec),
+) *durable.Run {
 	t.Helper()
 	_, r := submitChatFixture(t, s, "owner", "test", durable.AgentConfig{
 		Model:    durable.ModelSpec{Name: "test", BaseURL: "http://localhost:11434/v1"},
@@ -119,7 +138,7 @@ func submit(t *testing.T, s *durable.Store, name string, policy durable.Policy) 
 				Parameters: json.RawMessage(`{"type":"object"}`),
 			},
 		},
-	}, "do work", time.Hour, 4)
+	}, "do work", time.Hour, 4, configureSpec...)
 	return r
 }
 
@@ -398,9 +417,23 @@ func TestSteeringSurvivesWorkerTakeover(t *testing.T) {
 	attemptCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var calls int
-	build := func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+	var builds int
+	build := func(bctx context.Context, _ *durable.Store, _ durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+		builds++
+		if builds == 1 {
+			// The worker is lost before any model dispatch: no inflight
+			// marker is persisted, so a replacement may safely resume.
+			cancel()
+			return &fakeModel{
+				generate: func(context.Context, []*schema.Message) (*schema.Message, error) {
+					return nil, bctx.Err()
+				},
+			}, map[string]engine.Binding{
+				"lookup": {Policy: durable.ReadOnly, Tool: &fakeTool{name: "lookup"}},
+			}, nil
+		}
 		return &fakeModel{
-			generate: func(_ context.Context, messages []*schema.Message) (*schema.Message, error) {
+			generate: func(genCtx context.Context, messages []*schema.Message) (*schema.Message, error) {
 				calls++
 				var count int
 				for _, message := range messages {
@@ -410,10 +443,6 @@ func TestSteeringSurvivesWorkerTakeover(t *testing.T) {
 				}
 				if count != 1 {
 					return nil, fmt.Errorf("attempt %d: steering count = %d", calls, count)
-				}
-				if calls == 1 {
-					cancel()
-					return nil, context.Canceled
 				}
 				return schema.AssistantMessage("recovered", nil), nil
 			},
@@ -444,7 +473,88 @@ func TestSteeringSurvivesWorkerTakeover(t *testing.T) {
 		t.Fatal(err)
 	}
 	done, err := reopened.Get(ctx, "owner", run.ID)
-	if err != nil || done.Status != durable.Completed || done.Output != "recovered" || calls != 2 {
-		t.Fatalf("recovery: run=%+v calls=%d err=%v", done, calls, err)
+	if err != nil || done.Status != durable.Completed || done.Output != "recovered" || calls != 1 || builds != 2 {
+		t.Fatalf("recovery: run=%+v calls=%d builds=%d err=%v", done, calls, builds, err)
+	}
+}
+
+func TestInflightModelBlocksReplacement(t *testing.T) {
+	store, dsn := testDB(t)
+	ctx := context.Background()
+	run := submit(t, store, "lookup", durable.ReadOnly)
+	claimed := getClaim(t, store)
+	attemptCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var toolCalls int
+	build := func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+		return &fakeModel{
+			generate: func(context.Context, []*schema.Message) (*schema.Message, error) {
+				// The worker is lost after the model was dispatched but before
+				// its usage was persisted; consumption is unknown.
+				cancel()
+				return nil, context.Canceled
+			},
+		}, map[string]engine.Binding{
+			"lookup": {
+				Policy: durable.ReadOnly,
+				Tool: &fakeTool{
+					name: "lookup",
+					invoke: func(context.Context, string) (string, error) {
+						toolCalls++
+						return "ok", nil
+					},
+				},
+			},
+		}, nil
+	}
+	first := &engine.Engine{Store: store, Build: build}
+	if err := first.Execute(attemptCtx, claimed); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first attempt: %v", err)
+	}
+	if err := store.DB().Exec(
+		"UPDATE durable_run SET lease_until = clock_timestamp() - interval '1 second' WHERE id = ?", run.ID,
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := durable.Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	replacement, err := reopened.Claim(ctx, "replacement-worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var builds int
+	second := &engine.Engine{
+		Store: reopened,
+		Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+			builds++
+			return build(context.Background(), nil, durable.Spec{})
+		},
+	}
+	if err = second.Execute(ctx, replacement); err != nil {
+		t.Fatalf("replacement must commit the block boundary: %v", err)
+	}
+	done, err := reopened.Get(ctx, "owner", run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != durable.Blocked {
+		t.Fatalf("expected blocked run, got %+v", done)
+	}
+	if !strings.Contains(done.Error, "unknown consumption") ||
+		!strings.Contains(done.Error, "automatic replay is disabled") {
+		t.Fatalf("unexpected block detail: %q", done.Error)
+	}
+	if builds != 0 || toolCalls != 0 {
+		t.Fatalf(
+			"replacement must not build, call the model, or run tools: builds=%d toolCalls=%d",
+			builds,
+			toolCalls,
+		)
+	}
+	if _, err = reopened.Claim(ctx, "third-worker", time.Minute); !errors.Is(err, durable.ErrNoWork) {
+		t.Fatal("blocked run must not be claimable")
 	}
 }

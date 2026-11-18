@@ -27,8 +27,8 @@ func createPublishedAgentFixture(
 	}
 	if err = s.DB().WithContext(ctx).Exec(
 		`INSERT INTO agent
-		 (id, owner_id, name, draft, revision, published_revision, published_version, created_at, updated_at)
-		 VALUES (?, ?, ?, CAST(? AS jsonb), 1, 1, 1, clock_timestamp(), clock_timestamp())`,
+		 (id, tenant_id, project_id, owner_id, name, draft, revision, published_revision, published_version, created_at, updated_at)
+		 VALUES (?, 'tenant', '', ?, ?, CAST(? AS jsonb), 1, 1, 1, clock_timestamp(), clock_timestamp())`,
 		agentID, owner, name, string(draft),
 	).Error; err != nil {
 		t.Fatal(err)
@@ -73,7 +73,7 @@ func submitChatFixture(
 		Kind:        execution.SubmitChat,
 		SessionID:   session.ID,
 		Query:       query,
-	}, durable.PrepareChatSubmission(config, agentID, version))
+	}, durable.PrepareChatSubmission(config, agentID, version, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
