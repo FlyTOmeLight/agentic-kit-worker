@@ -194,3 +194,80 @@ func TestLadderPreservesEinoMetadataAndTruncatesOutboundArguments(t *testing.T) 
 		t.Fatal("outbound projection lost model metadata, changed exempt output, or mutated original messages")
 	}
 }
+
+func TestFillLegacyHistorySplitsTurnsAfterToolBatch(t *testing.T) {
+	splitSnapshot := &contextbuilder.Snapshot{
+		Policy: contextbuilder.Policy{Version: contextbuilder.PolicyVersionV4},
+		Budget: contextbuilder.Budget{CounterVersion: contextbuilder.CJKWeightedCounterVersion},
+	}
+	fillLegacyHistory(splitSnapshot, []durable.Message{
+		{Role: "user", Content: "turn 1 " + strings.Repeat("alpha ", 60)},
+		{
+			Role:    "assistant",
+			Content: "calling lookup",
+			ToolCalls: []durable.ToolCall{{
+				ID:        "c1",
+				Name:      "lookup",
+				Arguments: "{}",
+			}},
+		},
+		{Role: "tool", ToolCallID: "c1", Content: "result 1"},
+		{Role: "user", Content: "turn 2"},
+		{Role: "assistant", Content: "answer 2"},
+	})
+	if len(splitSnapshot.Materials.History) != 2 ||
+		len(splitSnapshot.Materials.History[0].Messages) != 3 ||
+		len(splitSnapshot.Materials.History[1].Messages) != 2 {
+		t.Fatalf("unexpected history split: %+v", splitSnapshot.Materials.History)
+	}
+
+	built, err := contextbuilder.Build(contextbuilder.BuildInput{
+		FrozenMaterials: splitSnapshot.Materials,
+		CurrentTurn:     []contextbuilder.Message{{Role: contextbuilder.RoleUser, Content: "now"}},
+		Policy:          splitSnapshot.Policy,
+		Budget:          contextbuilder.Budget{MaxInputBytes: 250},
+	})
+	if err != nil {
+		t.Fatalf("Build with split history: %v", err)
+	}
+	if len(built.OmittedSources) != 1 || built.OmittedSources[0].Source.ID != "hist-0" {
+		t.Fatalf("expected only hist-0 omitted, got %+v", built.OmittedSources)
+	}
+	var joined strings.Builder
+	for _, msg := range built.Messages {
+		joined.WriteString(msg.Content)
+		joined.WriteByte('\n')
+	}
+	if !strings.Contains(joined.String(), "turn 2") || !strings.Contains(joined.String(), "answer 2") {
+		t.Fatalf("turn 2 was omitted with turn 1: %s", joined.String())
+	}
+
+	multiSnapshot := &contextbuilder.Snapshot{}
+	fillLegacyHistory(multiSnapshot, []durable.Message{
+		{Role: "user", Content: "multi"},
+		{
+			Role:    "assistant",
+			Content: "step 1",
+			ToolCalls: []durable.ToolCall{{
+				ID:        "m1",
+				Name:      "lookup",
+				Arguments: "{}",
+			}},
+		},
+		{Role: "tool", ToolCallID: "m1", Content: "res 1"},
+		{
+			Role:    "assistant",
+			Content: "step 2",
+			ToolCalls: []durable.ToolCall{{
+				ID:        "m2",
+				Name:      "lookup",
+				Arguments: "{}",
+			}},
+		},
+		{Role: "tool", ToolCallID: "m2", Content: "res 2"},
+		{Role: "assistant", Content: "final"},
+	})
+	if len(multiSnapshot.Materials.History) != 1 || len(multiSnapshot.Materials.History[0].Messages) != 6 {
+		t.Fatalf("multi-tool turn split unexpectedly: %+v", multiSnapshot.Materials.History)
+	}
+}

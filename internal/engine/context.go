@@ -62,6 +62,9 @@ func fillLegacyHistory(snapshot *contextbuilder.Snapshot, history []durable.Mess
 				contextbuilder.ToolCall{ID: call.ID, Name: call.Name, Arguments: call.Arguments},
 			)
 		}
+		if m.Role == contextbuilder.RoleUser && len(group) > 0 && pending == 0 {
+			addGroup()
+		}
 		group = append(group, m)
 		switch m.Role {
 		case contextbuilder.RoleAssistant:
@@ -70,7 +73,9 @@ func fillLegacyHistory(snapshot *contextbuilder.Snapshot, history []durable.Mess
 				addGroup()
 			}
 		case contextbuilder.RoleTool:
-			pending--
+			if pending > 0 {
+				pending--
+			}
 		}
 	}
 	addGroup()
