@@ -166,7 +166,9 @@ func TestSummarizerUsesIndependentModelWithoutTools(t *testing.T) {
 		finish    string
 		wantError bool
 	}{
-		{name: "summary", message: `{"role":"assistant","content":"Confirmed facts: task remains open."}`, finish: "stop", wantError: false},
+		{name: "summary", message: `{"role":"assistant","content":"## Objective\nContinue task\n## Facts\nTask remains open\n## Next\nVerify result"}`, finish: "stop", wantError: false},
+		{name: "short", message: `{"role":"assistant","content":"## A\n## B\n## C"}`, finish: "stop", wantError: true},
+		{name: "missing sections", message: `{"role":"assistant","content":"## Facts\nTask remains open and needs verification."}`, finish: "stop", wantError: true},
 		{name: "empty", message: `{"role":"assistant","content":" "}`, finish: "stop", wantError: true},
 		{name: "truncated", message: `{"role":"assistant","content":"partial"}`, finish: "length", wantError: true},
 		{name: "tool call", message: `{"role":"assistant","content":"summary","tool_calls":[{"id":"call","type":"function","function":{"name":"lookup","arguments":"{}"}}]}`, finish: "tool_calls", wantError: true},
@@ -298,7 +300,7 @@ func TestSummarizerHTTPUsage(t *testing.T) {
 					}
 					fmt.Fprintf(
 						response,
-						`{"id":"summary","choices":[{"index":0,"message":{"role":"assistant","content":"summary"},"finish_reason":"stop"}]%s}`,
+						`{"id":"summary","choices":[{"index":0,"message":{"role":"assistant","content":"## Objective\nContinue task\n## Facts\nTask remains open\n## Next\nVerify result"},"finish_reason":"stop"}]%s}`,
 						usage,
 					)
 				}),

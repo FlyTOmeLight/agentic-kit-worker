@@ -32,8 +32,68 @@ type boundaryModel struct {
 }
 
 func (m *boundaryModel) Generate(
-	ctx context.Context,
-	input []*schema.Message,
+	ctx context.Context, input []*schema.Message, opts ...model.Option,
+) (*schema.Message, error) {
+	return m.call(
+		ctx,
+		input,
+		func(ctx context.Context, prepared []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			return m.BaseChatModel.Generate(ctx, prepared, opts...)
+		},
+		opts...)
+}
+
+func (m *boundaryModel) Stream(
+	ctx context.Context, input []*schema.Message, opts ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.call(ctx, input, m.collectStream, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func (m *boundaryModel) collectStream(
+	ctx context.Context, input []*schema.Message, opts ...model.Option,
+) (*schema.Message, error) {
+	reader, err := m.BaseChatModel.Stream(ctx, input, opts...)
+	if err != nil {
+		if reader != nil {
+			reader.Close()
+		}
+		return nil, err
+	}
+	if reader == nil {
+		return nil, errors.New("model returned no stream")
+	}
+	defer reader.Close()
+	var chunks []*schema.Message
+	var streamErr error
+	for {
+		chunk, receiveErr := reader.Recv()
+		if chunk != nil {
+			chunks = append(chunks, chunk)
+		}
+		if receiveErr != nil {
+			if !errors.Is(receiveErr, io.EOF) {
+				streamErr = receiveErr
+			}
+			break
+		}
+	}
+	if len(chunks) == 0 {
+		return nil, streamErr
+	}
+	msg, err := schema.ConcatMessages(chunks)
+	if err != nil {
+		return nil, err
+	}
+	return msg, streamErr
+}
+
+func (m *boundaryModel) call(
+	ctx context.Context, input []*schema.Message,
+	dispatch func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error),
 	opts ...model.Option,
 ) (*schema.Message, error) {
 	s := m.execution
@@ -46,125 +106,103 @@ func (m *boundaryModel) Generate(
 	if s.state.PendingModel != nil {
 		return m.applyResponse(ctx, s.state.PendingModel)
 	}
-	input, err := m.prepare(ctx, input, opts...)
-	if err != nil {
-		return nil, err
-	}
-	msg, callErr := m.BaseChatModel.Generate(ctx, input, opts...)
-	return m.complete(ctx, msg, callErr)
-}
-
-func (m *boundaryModel) Stream(
-	ctx context.Context,
-	input []*schema.Message,
-	opts ...model.Option,
-) (*schema.StreamReader[*schema.Message], error) {
-	if err := m.execution.checkPricing(ctx); err != nil {
-		return nil, err
-	}
-	if m.execution.state.Final != nil {
-		return schema.StreamReaderFromArray([]*schema.Message{
-			schema.AssistantMessage(*m.execution.state.Final, nil),
-		}), nil
-	}
-	if m.execution.state.PendingModel != nil {
-		message, err := m.applyResponse(ctx, m.execution.state.PendingModel)
+	var previous *durable.ContextInfo
+	var targetTokens, targetBytes int64
+	for attempt := 0; ; attempt++ {
+		prepared, info, err := m.prepareAttempt(ctx, input, attempt, targetTokens, targetBytes, opts...)
 		if err != nil {
 			return nil, err
 		}
-		return schema.StreamReaderFromArray([]*schema.Message{message}), nil
-	}
-	input, err := m.prepare(ctx, input, opts...)
-	if err != nil {
-		return nil, err
-	}
-	reader, err := m.BaseChatModel.Stream(ctx, input, opts...)
-	if err != nil {
-		m.execution.retry = true
-		return nil, err
-	}
-	if reader == nil {
-		return nil, errors.New("model returned no stream")
-	}
-	defer reader.Close()
-	var chunks []*schema.Message
-	var streamErr error
-	for {
-		chunk, receiveErr := reader.Recv()
-		if errors.Is(receiveErr, io.EOF) {
-			break
+		msg, callErr := dispatch(ctx, prepared, opts...)
+		generated := msg != nil && (msg.Content != "" || msg.ReasoningContent != "" || len(msg.ToolCalls) > 0)
+		if generated || hasModelUsage(msg) || !isContextOverflowError(callErr) {
+			return m.complete(ctx, msg, callErr)
 		}
-		if receiveErr != nil {
-			streamErr = receiveErr
-			break
-		}
-		if chunk != nil {
-			chunks = append(chunks, chunk)
-		}
-	}
-	var message *schema.Message
-	if len(chunks) > 0 {
-		message, err = schema.ConcatMessages(chunks)
-		if err != nil {
+		marker := s.state.InflightModel
+		s.state.InflightModel = nil
+		if err := s.store.RecordModelOverflow(
+			ctx,
+			s.run.Lease(),
+			attempt+1,
+			callErr.Error(),
+			s.encode(),
+		); err != nil {
+			s.state.InflightModel = marker
 			return nil, err
 		}
+
+		tokenFloor := max(1, info.TokenLimit/10)
+		byteFloor := max(1, info.ByteLimit/10)
+		if info.TokenLimit == 0 && info.ByteLimit == 0 {
+			// An unconfigured upstream window can still reject input. Use
+			// the first rejected byte size as the reference for its floor.
+			byteFloor = max(1, info.InputBytes/10)
+			if previous != nil {
+				byteFloor = max(1, previous.InputBytes/10)
+			}
+		}
+		atFloor := false
+		targetTokens, targetBytes = 0, 0
+		if info.TokenLimit > 0 {
+			atFloor = info.InputTokens <= tokenFloor
+			targetTokens = max(tokenFloor, info.InputTokens*7/10)
+		}
+		if info.ByteLimit > 0 || info.TokenLimit == 0 {
+			atFloor = atFloor || info.InputBytes <= byteFloor
+			targetBytes = max(byteFloor, info.InputBytes*7/10)
+		}
+		noShrink := previous != nil && info.InputTokens >= previous.InputTokens &&
+			info.InputBytes >= previous.InputBytes
+		if attempt >= maxReactiveOverflowAttempts || atFloor || noShrink {
+			s.retry = false
+			return nil, fmt.Errorf("%w: %v", ErrContextCompressionExhausted, callErr)
+		}
+		previous = info
 	}
-	message, err = m.complete(ctx, message, streamErr)
-	if err != nil {
-		return nil, err
-	}
-	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
 }
 
-func (m *boundaryModel) prepare(
-	ctx context.Context,
-	input []*schema.Message,
+func hasModelUsage(msg *schema.Message) bool {
+	return msg != nil && msg.ResponseMeta != nil && msg.ResponseMeta.Usage != nil
+}
+
+func (m *boundaryModel) prepareAttempt(
+	ctx context.Context, input []*schema.Message, attempt int, targetTokens, targetBytes int64,
 	opts ...model.Option,
-) ([]*schema.Message, error) {
+) ([]*schema.Message, *durable.ContextInfo, error) {
 	s := m.execution
 	if s.state.Turn >= s.run.Spec.MaxTurns {
-		return nil, fmt.Errorf("model turn limit exceeded: %d", s.run.Spec.MaxTurns)
+		return nil, nil, fmt.Errorf("model turn limit exceeded: %d", s.run.Spec.MaxTurns)
 	}
-	var err error
 	if s.store != nil {
-		if err = s.store.CheckUsageBudget(ctx, s.run.Lease()); err != nil {
-			return nil, err
+		if err := s.store.CheckUsageBudget(ctx, s.run.Lease()); err != nil {
+			return nil, nil, err
 		}
-		_, err = s.store.TakePendingSteer(ctx, s.run.Lease(), func(steer string) json.RawMessage {
+		_, err := s.store.TakePendingSteer(ctx, s.run.Lease(), func(steer string) json.RawMessage {
 			s.state.Steers = append(s.state.Steers, steer)
 			return s.encode()
 		})
 		if err != nil {
-			return nil, err
-		}
-	}
-	if (s.summarizer != nil && s.compactionMaxBytes > 0) || s.run.CompactedSummary != "" {
-		input, err = s.projectContext(ctx, input)
-		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	options := model.GetCommonOptions(&model.Options{}, opts...)
-	input, contextInfo, err := s.buildContext(input, options.Tools)
+	input, info, _, err := s.prepareModelInput(ctx, input, options.Tools, attempt, targetTokens, targetBytes)
 	if err != nil {
-		return nil, err
-	}
-	for _, item := range s.state.Steers {
-		input = append(input, schema.UserMessage(item))
+		return nil, nil, err
 	}
 	if err := s.store.CheckUsageBudget(ctx, s.run.Lease()); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	s.state.InflightModel = &InflightModel{Kind: "model", Sequence: int64(s.state.Turn)}
 	if err := s.store.CommitBoundary(ctx, s.run.Lease(), durable.Boundary{
 		Kind:    durable.BoundaryModelStarted,
 		State:   s.encode(),
-		Context: contextInfo,
+		Context: info,
 	}); err != nil {
 		s.state.InflightModel = nil
-		return nil, err
+		return nil, nil, err
 	}
-	return input, nil
+	return input, info, nil
 }
 
 func (m *boundaryModel) complete(ctx context.Context, msg *schema.Message, callErr error) (*schema.Message, error) {
@@ -176,7 +214,7 @@ func (m *boundaryModel) complete(ctx context.Context, msg *schema.Message, callE
 		}
 		return nil, errors.New("model returned no message")
 	}
-	if msg.ResponseMeta == nil || msg.ResponseMeta.Usage == nil {
+	if !hasModelUsage(msg) {
 		return nil, errors.Join(ErrModelUsageUnavailable, callErr)
 	}
 	usage := msg.ResponseMeta.Usage
@@ -195,6 +233,10 @@ func (m *boundaryModel) complete(ctx context.Context, msg *schema.Message, callE
 	s.state.InflightModel = nil
 	if callErr == nil {
 		s.state.PendingModel = msg
+		s.state.UsageAnchor = &UsageAnchor{
+			Turn: callTurn, PromptTokens: int64(usage.PromptTokens),
+			EstimatedInputTokens: s.lastEstimatedInputTokens,
+		}
 	}
 	if err := s.store.RecordUsageWithCost(
 		ctx,

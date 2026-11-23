@@ -171,6 +171,18 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 			tools = append(tools, bindings[name].Tool)
 		}
 	}
+	if bindings == nil {
+		bindings = make(map[string]Binding)
+	}
+	if _, exists := bindings[readStepResultTool]; !exists &&
+		(len(run.Spec.Tools) > 0 || len(run.Spec.Toolsets) > 0) {
+		binding, err := readStepResultBinding(s)
+		if err != nil {
+			return s.fail(ctx, err)
+		}
+		bindings[readStepResultTool] = binding
+		tools = append(tools, binding.Tool)
+	}
 	bindings[invalidInputTool] = Binding{Policy: durable.ReadOnly}
 	s.bindings = bindings
 	maxIterations := run.Spec.MaxTurns
@@ -185,11 +197,8 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 		Model:         llm,
 		MaxIterations: maxIterations,
 		// Published prompts are literal text, not templates.
-		GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
-			if s.snapshot != nil {
-				return input.Messages, nil
-			}
-			return append([]*schema.Message{schema.SystemMessage(instruction)}, input.Messages...), nil
+		GenModelInput: func(_ context.Context, _ string, input *adk.AgentInput) ([]*schema.Message, error) {
+			return input.Messages, nil
 		},
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
 			Tools: tools, ExecuteSequentially: true,
@@ -226,19 +235,11 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 	if len(s.state.Checkpoint) > 0 {
 		iter, err = runner.Resume(ctx, run.ID)
 	} else {
-		var messages []*schema.Message
-		if s.snapshot != nil {
-			messages = []*schema.Message{schema.UserMessage(run.Spec.Query)}
-		} else {
-			for _, msg := range run.Spec.History {
-				messages = append(
-					messages,
-					&schema.Message{Role: schema.RoleType(msg.Role), Content: msg.Content},
-				)
-			}
-			messages = append(messages, schema.UserMessage(run.Spec.Query))
-		}
-		iter = runner.Run(ctx, messages, adk.WithCheckPointID(run.ID))
+		iter = runner.Run(
+			ctx,
+			[]*schema.Message{schema.UserMessage(run.Spec.Query)},
+			adk.WithCheckPointID(run.ID),
+		)
 	}
 	// Eino owns the ReAct loop. This loop consumes events and resumes automatic
 	// tool-boundary checkpoints after their database transaction has committed.

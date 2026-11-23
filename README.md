@@ -7,7 +7,13 @@ Worker 在 `go.mod` 中固定配套的 `agentic-kit-api` 版本。构建前需�
 
 ## 项目结构
 
-上下文构建复用 API 的 `pkg/contextbuilder`。每次真实模型调用在 `boundaryModel.Generate` 中构建上下文，并计入该次调用实际绑定的工具定义。构建只替换发给模型的消息，Eino checkpoint、持久化工具结果和冻结材料保留完整内容；不通过 `BeforeModelRewriteState` 保存裁剪结果。新 Run 的 `context-v2` 先移除低优先级 Memory，再折叠历史工具过程、保留问答，仍超限才淘汰整轮；旧 `context-v1` 仍按原规则处理。大工具输出使用 UTF-8 安全首尾预览，必需输入仍超预算时以 Failed 结束，不调用模型或自动重试。配置模型窗口后使用保守字节估算，不代表精确 token 计数。
+Worker 在 `boundaryModel` 中用 API 的 `context-v4` 统一构建每次模型请求，真实工具定义和 steer 一起计入预算。它用 `cjk-weighted-v1` 估算 token，并随用量保存 `UsageAnchor`。下一轮输入估算增长时，可用上一轮实际 prompt token 加上估算增量判断是否提前压缩。
+
+接近预算时，Worker 先预览旧工具结果、缩短长参数，必要时用带步骤 ID 的短条替代旧结果。仍超过目标时，Worker 按完整工具批次保留近期消息，把较早的内容分块交给模型滚动摘要。每块沿用 Run 的冻结计价并单独记录用量。连续三次可归因的摘要失败会打开熔断器，计数随执行状态保存。摘要无法达到目标时，Worker 可从模型输入移除最早的完整轮次，保留原始目标、人工澄清或审核结果及 steer。
+
+只有供应方明确返回上下文溢出且没有用量时，Worker 才清除该次派发标记，写入 `ModelOverflowRejected` 并缩小输入。主模型最多重试五次，达到输入下限、请求无法继续缩小或重试用完仍被拒绝时进入 `Failed`。无法确定消费的调用仍进入 `Blocked`，由人工通过 `Unblock` 恢复。
+
+上下文压缩只改当前请求的消息投影。Eino checkpoint、`durable_step` 和 `agent_message` 保留原始事实。启用工具或工具集的 Run 可调用只读工具 `read_step_result`，通过本 Run 的步骤 ID 和字节偏移读取完整工具结果，按 UTF-8 边界分页。Run 成功后摘要和保留边界才提升到 Session，后续 Run 冻结该摘要及保留的消息。
 
 入口位于 `cmd/worker`，server-go 生命周期与资源装配位于 `internal/service`，执行器位于 `internal/engine`，模型与工具适配位于 `internal/adapters`。数据库访问统一由 API 的 `pkg/durable` 使用 GORM 管理，worker 复用其中的事务和状态操作；[目录与依赖说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/layout.md)。
 
@@ -54,6 +60,7 @@ go run ./cmd/worker -log-config conf/server/logger.toml
 | Worker.Concurrency | WORKER_CONCURRENCY | 4，必须大于 0 |
 | Worker.Lease | WORKER_LEASE | 30s，至少 300ms；每三分之一租约时间续期 |
 | Worker.Poll | WORKER_POLL | 1s，必须大于 0 |
+| Compaction.MaxInputBytes | COMPACTION_MAX_INPUT_BYTES | 65536，未配置模型窗口时用于提前触发字节压缩，0 表示沿用快照的字节阈值 |
 
 ### 模型计价
 
