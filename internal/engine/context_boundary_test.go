@@ -17,7 +17,7 @@ func TestModelBoundaryCountsActualToolDefinitionsBeforeCallingModel(t *testing.T
 	state := &execution{
 		run: &durable.Run{Spec: durable.Spec{Query: "question", MaxTurns: 2, PricingFrozen: true}},
 		snapshot: &contextbuilder.Snapshot{
-			Policy: contextbuilder.Policy{Version: contextbuilder.PolicyVersionV2},
+			Policy: contextbuilder.Policy{Version: contextbuilder.PolicyVersionV4},
 			Budget: contextbuilder.Budget{MaxInputBytes: 200},
 		},
 	}
@@ -39,17 +39,25 @@ func TestModelBoundaryCountsActualToolDefinitionsBeforeCallingModel(t *testing.T
 
 func TestBuildContextUsesExplicitEmptyTools(t *testing.T) {
 	state := &execution{
+		run: &durable.Run{},
 		snapshot: &contextbuilder.Snapshot{
 			Materials: contextbuilder.FrozenMaterials{
 				Tools: []contextbuilder.ToolDefinition{
 					{Name: "unused", Description: strings.Repeat("unused ", 100)},
 				},
 			},
-			Policy: contextbuilder.Policy{Version: contextbuilder.PolicyVersionV2},
+			Policy: contextbuilder.Policy{Version: contextbuilder.PolicyVersionV4},
 			Budget: contextbuilder.Budget{MaxInputBytes: 100},
 		},
 	}
-	messages, _, err := state.buildContext([]*schema.Message{schema.UserMessage("question")}, nil)
+	messages, _, _, err := state.prepareModelInput(
+		context.Background(),
+		[]*schema.Message{schema.UserMessage("question")},
+		nil,
+		0,
+		0,
+		0,
+	)
 	if err != nil || len(messages) != 1 || messages[0].Content != "question" {
 		t.Fatalf("empty active tools must replace frozen tools: messages=%+v error=%v", messages, err)
 	}
@@ -63,10 +71,10 @@ func TestBuildContextProjectsOlderCurrentToolResults(t *testing.T) {
 		run: &durable.Run{Spec: durable.Spec{Query: "question"}},
 		snapshot: &contextbuilder.Snapshot{
 			Policy: contextbuilder.Policy{
-				Version:               contextbuilder.PolicyVersionV3,
+				Version:               contextbuilder.PolicyVersionV4,
 				KeepRecentToolResults: 2,
 			},
-			Budget: contextbuilder.Budget{CounterVersion: contextbuilder.ByteEstimateVersion},
+			Budget: contextbuilder.Budget{CounterVersion: contextbuilder.CJKWeightedCounterVersion},
 		},
 	}
 	content := strings.Repeat("result ", 50)
@@ -86,7 +94,7 @@ func TestBuildContextProjectsOlderCurrentToolResults(t *testing.T) {
 		)
 	}
 
-	_, full, err := state.buildContext(messages, nil)
+	_, full, _, err := state.prepareModelInput(context.Background(), messages, nil, 0, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,12 +102,12 @@ func TestBuildContextProjectsOlderCurrentToolResults(t *testing.T) {
 		t.Fatalf("unlimited build projected %d results", full.ProjectedToolResults)
 	}
 	state.snapshot.Budget.MaxInputBytes = full.InputBytes - 1
-	built, info, err := state.buildContext(messages, nil)
+	built, info, _, err := state.prepareModelInput(context.Background(), messages, nil, 1, 0, full.InputBytes-1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.ProjectedToolResults != 3 {
-		t.Fatalf("projected %d, want 3", info.ProjectedToolResults)
+	if info.ProjectedToolResults != 1 {
+		t.Fatalf("projected %d, want 1", info.ProjectedToolResults)
 	}
 	if info.InputBytes > state.snapshot.Budget.MaxInputBytes || info.InputBytes >= full.InputBytes {
 		t.Fatalf("usage %d, want within %d and below %d",
@@ -111,7 +119,7 @@ func TestBuildContextProjectsOlderCurrentToolResults(t *testing.T) {
 			continue
 		}
 		switch {
-		case strings.HasPrefix(message.Content, "[Tool result projected:"):
+		case strings.HasPrefix(message.Content, "[Tool result stub:"):
 			markers++
 		case message.Content == content:
 			intact++
@@ -119,10 +127,147 @@ func TestBuildContextProjectsOlderCurrentToolResults(t *testing.T) {
 			t.Fatalf("unexpected tool content: %q", message.Content)
 		}
 	}
-	if markers != 3 || intact != 2 {
-		t.Fatalf("markers=%d intact=%d, want 3 and 2", markers, intact)
+	if markers != 1 || intact != 4 {
+		t.Fatalf("markers=%d intact=%d, want 1 and 4", markers, intact)
 	}
 	if messages[2].Content != content {
 		t.Fatal("projection mutated the Eino state messages")
+	}
+}
+
+func TestUsageAnchorTriggersProactiveCompression(t *testing.T) {
+	state := &execution{
+		run: &durable.Run{Spec: durable.Spec{Query: "question"}},
+		snapshot: &contextbuilder.Snapshot{
+			Policy: contextbuilder.Policy{Version: contextbuilder.PolicyVersionV4},
+			Budget: contextbuilder.Budget{
+				MaxInputTokens: 1000,
+				CounterVersion: contextbuilder.CJKWeightedCounterVersion,
+			},
+			Materials: contextbuilder.FrozenMaterials{History: []contextbuilder.MessageGroup{{
+				Source: contextbuilder.Source{Kind: contextbuilder.SourceHistory, ID: "previous"},
+				Messages: []contextbuilder.Message{
+					{Role: contextbuilder.RoleUser, Content: "older question"},
+					{Role: contextbuilder.RoleAssistant, Content: strings.Repeat("abc ", 450)},
+				},
+			}}},
+		},
+		state: State{Turn: 2, UsageAnchor: &UsageAnchor{Turn: 0, PromptTokens: 920, EstimatedInputTokens: 300}},
+	}
+	input := []*schema.Message{schema.UserMessage("question")}
+	_, without, _, err := state.prepareModelInput(context.Background(), input, nil, 0, 0, 0)
+	if err != nil || without.UsedUsageAnchor || len(without.OmittedSources) != 0 {
+		t.Fatalf("stale anchor affected projection: %+v error=%v", without, err)
+	}
+	state.state.UsageAnchor.Turn = 1
+	_, with, _, err := state.prepareModelInput(context.Background(), input, nil, 0, 0, 0)
+	if err != nil || !with.UsedUsageAnchor || len(with.OmittedSources) != 1 ||
+		with.InputTokens >= without.InputTokens {
+		t.Fatalf("fresh anchor did not reduce projection: %+v error=%v", with, err)
+	}
+}
+
+func TestLadderPreservesEinoMetadataAndTruncatesOutboundArguments(t *testing.T) {
+	state := &execution{run: &durable.Run{Spec: durable.Spec{Query: "question"}}}
+	result := strings.Repeat("content ", 1000)
+	args := fmt.Sprintf(`{"file":%q}`, strings.Repeat("argument ", 400))
+	input := []*schema.Message{schema.UserMessage("question")}
+	for i, name := range []string{"lookup", readStepResultTool} {
+		id := fmt.Sprintf("call-%d", i)
+		assistant := schema.AssistantMessage("searching", []schema.ToolCall{{
+			ID: id, Type: "function", Function: schema.FunctionCall{Name: name, Arguments: args},
+			Extra: map[string]any{"signature": "signed"},
+		}})
+		assistant.ReasoningContent = "private reasoning"
+		assistant.Name = "provider"
+		assistant.ResponseMeta = &schema.ResponseMeta{FinishReason: "tool_calls"}
+		input = append(input, assistant, schema.ToolMessage(result, id))
+	}
+	out, info, _, err := state.prepareModelInput(context.Background(), input, nil, 1, 0, 17100)
+	if err != nil || info.LadderPreviewed != 1 || info.DroppedRounds != 0 {
+		t.Fatalf("ladder projection info=%+v error=%v", info, err)
+	}
+	if out[1].ToolCalls[0].Function.Arguments == args || out[1].ToolCalls[0].Extra["signature"] != "signed" ||
+		out[1].Name != input[1].Name || out[1].ReasoningContent != input[1].ReasoningContent ||
+		out[1].ResponseMeta != input[1].ResponseMeta || out[4].Content != result ||
+		input[1].ToolCalls[0].Function.Arguments != args || input[2].Content != result {
+		t.Fatal("outbound projection lost model metadata, changed exempt output, or mutated original messages")
+	}
+}
+
+func TestFillLegacyHistorySplitsTurnsAfterToolBatch(t *testing.T) {
+	splitSnapshot := &contextbuilder.Snapshot{
+		Policy: contextbuilder.Policy{Version: contextbuilder.PolicyVersionV4},
+		Budget: contextbuilder.Budget{CounterVersion: contextbuilder.CJKWeightedCounterVersion},
+	}
+	fillLegacyHistory(splitSnapshot, []durable.Message{
+		{Role: "user", Content: "turn 1 " + strings.Repeat("alpha ", 60)},
+		{
+			Role:    "assistant",
+			Content: "calling lookup",
+			ToolCalls: []durable.ToolCall{{
+				ID:        "c1",
+				Name:      "lookup",
+				Arguments: "{}",
+			}},
+		},
+		{Role: "tool", ToolCallID: "c1", Content: "result 1"},
+		{Role: "user", Content: "turn 2"},
+		{Role: "assistant", Content: "answer 2"},
+	})
+	if len(splitSnapshot.Materials.History) != 2 ||
+		len(splitSnapshot.Materials.History[0].Messages) != 3 ||
+		len(splitSnapshot.Materials.History[1].Messages) != 2 {
+		t.Fatalf("unexpected history split: %+v", splitSnapshot.Materials.History)
+	}
+
+	built, err := contextbuilder.Build(contextbuilder.BuildInput{
+		FrozenMaterials: splitSnapshot.Materials,
+		CurrentTurn:     []contextbuilder.Message{{Role: contextbuilder.RoleUser, Content: "now"}},
+		Policy:          splitSnapshot.Policy,
+		Budget:          contextbuilder.Budget{MaxInputBytes: 250},
+	})
+	if err != nil {
+		t.Fatalf("Build with split history: %v", err)
+	}
+	if len(built.OmittedSources) != 1 || built.OmittedSources[0].Source.ID != "hist-0" {
+		t.Fatalf("expected only hist-0 omitted, got %+v", built.OmittedSources)
+	}
+	var joined strings.Builder
+	for _, msg := range built.Messages {
+		joined.WriteString(msg.Content)
+		joined.WriteByte('\n')
+	}
+	if !strings.Contains(joined.String(), "turn 2") || !strings.Contains(joined.String(), "answer 2") {
+		t.Fatalf("turn 2 was omitted with turn 1: %s", joined.String())
+	}
+
+	multiSnapshot := &contextbuilder.Snapshot{}
+	fillLegacyHistory(multiSnapshot, []durable.Message{
+		{Role: "user", Content: "multi"},
+		{
+			Role:    "assistant",
+			Content: "step 1",
+			ToolCalls: []durable.ToolCall{{
+				ID:        "m1",
+				Name:      "lookup",
+				Arguments: "{}",
+			}},
+		},
+		{Role: "tool", ToolCallID: "m1", Content: "res 1"},
+		{
+			Role:    "assistant",
+			Content: "step 2",
+			ToolCalls: []durable.ToolCall{{
+				ID:        "m2",
+				Name:      "lookup",
+				Arguments: "{}",
+			}},
+		},
+		{Role: "tool", ToolCallID: "m2", Content: "res 2"},
+		{Role: "assistant", Content: "final"},
+	})
+	if len(multiSnapshot.Materials.History) != 1 || len(multiSnapshot.Materials.History[0].Messages) != 6 {
+		t.Fatalf("multi-tool turn split unexpectedly: %+v", multiSnapshot.Materials.History)
 	}
 }

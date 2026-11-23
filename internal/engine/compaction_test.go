@@ -127,8 +127,12 @@ func TestCompactionProjectionCompletes(t *testing.T) {
 	modelCalls, toolCalls, summaries := 0, 0, 0
 	summarizer := summaryFunc(func(summaryCtx context.Context, input engine.SummaryInput) (string, error) {
 		summaries++
-		if input.PreviousSummary != "" || len(input.Messages) != 3 ||
-			input.Messages[0].ToolCalls[0].ID != "turn_1_tool_0" {
+		previous := ""
+		if summaries > 1 {
+			previous = "Confirmed facts: first batch completed; continue lookup."
+		}
+		if input.PreviousSummary != previous || len(input.Messages) != 3 ||
+			input.Messages[0].ToolCalls[0].ID != fmt.Sprintf("turn_%d_tool_0", summaries) {
 			return "", fmt.Errorf("unexpected summary prefix: %+v", input)
 		}
 		if err := input.RecordUsage(
@@ -157,7 +161,7 @@ func TestCompactionProjectionCompletes(t *testing.T) {
 					if strings.Contains(message.Content, "Confirmed facts: first batch") {
 						summaryCount++
 					}
-					if message.Content == "do work" && message.Role == schema.User {
+					if strings.Contains(message.Content, "do work") && message.Role == schema.User {
 						queryCount++
 					}
 					if message.Role == schema.Tool {
@@ -169,16 +173,13 @@ func TestCompactionProjectionCompletes(t *testing.T) {
 						}
 					}
 				}
-				if summaryCount != 1 || resultCount != 4 || queryCount != 1 {
+				if summaryCount != 1 || resultCount != 2 || queryCount != 1 {
 					return nil, fmt.Errorf(
 						"model input summary=%d tools=%d query=%d",
 						summaryCount,
 						resultCount,
 						queryCount,
 					)
-				}
-				if modelCalls == 4 {
-					return schema.AssistantMessage("recovered with summary", nil), nil
 				}
 				return schema.AssistantMessage("recovered with summary", nil), nil
 			},
@@ -197,17 +198,17 @@ func TestCompactionProjectionCompletes(t *testing.T) {
 		t.Fatalf("first execution: %v", err)
 	}
 	saved, err := store.Get(ctx, "owner", run.ID)
-	if err != nil || saved.Status != durable.Completed || saved.CompactedSummary == "" || saved.FirstKeptSeq != 5 {
+	if err != nil || saved.Status != durable.Completed || saved.CompactedSummary == "" || saved.FirstKeptSeq != 8 {
 		t.Fatalf("saved projection = %+v, %v", saved, err)
 	}
 	var savedState engine.State
 	if err = json.Unmarshal(saved.State, &savedState); err != nil {
 		t.Fatal(err)
 	}
-	if savedState.SummaryCalls != 1 || savedState.InflightModel != nil {
+	if savedState.SummaryCalls != 2 || savedState.InflightModel != nil {
 		t.Fatalf("saved state: summaryCalls=%d inflight=%v", savedState.SummaryCalls, savedState.InflightModel)
 	}
-	if saved.Output != "recovered with summary" || toolCalls != 6 || summaries != 1 || modelCalls != 4 {
+	if saved.Output != "recovered with summary" || toolCalls != 6 || summaries != 2 || modelCalls != 4 {
 		t.Fatalf(
 			"saved=%+v toolCalls=%d summaries=%d modelCalls=%d",
 			saved,
@@ -229,7 +230,7 @@ func TestCompactionProjectionCompletes(t *testing.T) {
 		Where("run_id = ? AND call = ?", run.ID, "summary").Scan(&summaryUsage).Error; err != nil {
 		t.Fatal(err)
 	}
-	if summaryUsage.Count != 1 || summaryUsage.Tokens != 17 {
+	if summaryUsage.Count != 2 || summaryUsage.Tokens != 34 {
 		t.Fatalf("summary usage=%+v", summaryUsage)
 	}
 }
@@ -342,7 +343,7 @@ func TestBilledSummaryPersistsAfterParentCancel(t *testing.T) {
 				if err := checkToolPairs(input); err != nil {
 					return nil, err
 				}
-				if modelCalls <= 3 {
+				if modelCalls <= 2 {
 					return toolReply("lookup"), nil
 				}
 				for _, message := range input {
@@ -434,7 +435,7 @@ func TestBilledSummaryPersistsAfterParentCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	if done.Status != durable.Completed || done.Output != "done after takeover" ||
-		summaries != 1 || summaryUsage != 1 || toolCalls != 3 || modelCalls != 4 {
+		summaries != 1 || summaryUsage != 1 || toolCalls != 2 || modelCalls != 3 {
 		t.Fatalf(
 			"done=%+v summaries=%d usage=%d tools=%d models=%d",
 			done,
@@ -478,7 +479,7 @@ func TestCompactionFailureRetriesWithoutMovingBoundary(t *testing.T) {
 			if err := checkToolPairs(input); err != nil {
 				return nil, err
 			}
-			if models == 4 {
+			if models == 3 {
 				saved, readErr := store.Get(ctx, "owner", run.ID)
 				if readErr != nil || saved.FirstKeptSeq != 0 || saved.CompactedSummary != "" {
 					return nil, errors.New("failed summarization advanced the boundary")
@@ -489,11 +490,11 @@ func TestCompactionFailureRetriesWithoutMovingBoundary(t *testing.T) {
 						found = true
 					}
 				}
-				if !found {
-					return nil, errors.New("failed summarization discarded old messages")
+				if found {
+					return nil, errors.New("round fallback kept the old model input")
 				}
 			}
-			if models <= 4 {
+			if models <= 3 {
 				return toolReply("lookup"), nil
 			}
 			return schema.AssistantMessage("done", nil), nil
@@ -553,7 +554,7 @@ func TestCompactionRecordedUsageSurvivesSummaryError(t *testing.T) {
 	build := func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
 		return &fakeModel{generate: func(_ context.Context, input []*schema.Message) (*schema.Message, error) {
 			models++
-			if models <= 3 {
+			if models <= 2 {
 				return toolReply("lookup"), nil
 			}
 			return schema.AssistantMessage("done without summary", nil), nil
@@ -983,8 +984,8 @@ func TestCompactionMergesPreviousSummaryAndPreservesModelFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	saved, err := store.Get(ctx, "owner", run.ID)
-	if err != nil || saved.Status != durable.Completed || summaries != 3 ||
-		saved.CompactedSummary != "summary-3" || saved.FirstKeptSeq != 8 {
+	if err != nil || saved.Status != durable.Completed || summaries != 4 ||
+		saved.CompactedSummary != "summary-4" || saved.FirstKeptSeq != 10 {
 		t.Fatalf("saved=%+v summaries=%d error=%v", saved, summaries, err)
 	}
 }

@@ -22,32 +22,44 @@ import (
 // original call may have consumed tokens whose cost is unknown.
 type InflightModel = executionpkg.InflightModelDispatch
 
+type UsageAnchor struct {
+	Turn                 int   `json:"turn"`
+	PromptTokens         int64 `json:"promptTokens"`
+	EstimatedInputTokens int64 `json:"estimatedInputTokens"`
+}
+
 type State struct {
-	Version            int             `json:"version"`
-	Checkpoint         []byte          `json:"checkpoint,omitempty"`
-	Turn               int             `json:"turn"`
-	SummaryCalls       int64           `json:"summaryCalls,omitempty"`
-	InflightModel      *InflightModel  `json:"inflightModel,omitempty"`
-	PendingModel       *schema.Message `json:"pendingModel,omitempty"`
-	PricingFailure     string          `json:"pricingFailure,omitempty"`
-	ReturnDirectlyStep string          `json:"returnDirectlyStep,omitempty"`
-	Final              *string         `json:"final,omitempty"`
-	Steers             []string        `json:"steers,omitempty"`
+	UsageAnchor                *UsageAnchor    `json:"usageAnchor,omitempty"`
+	SummaryConsecutiveFailures int             `json:"summaryConsecutiveFailures,omitempty"`
+	CompactedInteractionPins   []compactedPin  `json:"compactedInteractionPins,omitempty"`
+	Version                    int             `json:"version"`
+	Checkpoint                 []byte          `json:"checkpoint,omitempty"`
+	Turn                       int             `json:"turn"`
+	SummaryCalls               int64           `json:"summaryCalls,omitempty"`
+	InflightModel              *InflightModel  `json:"inflightModel,omitempty"`
+	PendingModel               *schema.Message `json:"pendingModel,omitempty"`
+	PricingFailure             string          `json:"pricingFailure,omitempty"`
+	ReturnDirectlyStep         string          `json:"returnDirectlyStep,omitempty"`
+	Final                      *string         `json:"final,omitempty"`
+	Steers                     []string        `json:"steers,omitempty"`
 }
 
 type execution struct {
 	adk.BaseChatModelAgentMiddleware
-	store              *durable.Store
-	run                *durable.Run
-	state              State
-	bindings           map[string]Binding
-	decision           *durable.Message
-	pending            *durable.Boundary
-	retry              bool
-	toolError          error
-	summarizer         Summarizer
-	compactionMaxBytes int
-	snapshot           *contextbuilder.Snapshot
+	store                    *durable.Store
+	run                      *durable.Run
+	state                    State
+	bindings                 map[string]Binding
+	decision                 *durable.Message
+	pending                  *durable.Boundary
+	retry                    bool
+	toolError                error
+	summarizer               Summarizer
+	compactionMaxBytes       int
+	snapshot                 *contextbuilder.Snapshot
+	lastEstimatedInputTokens int64
+	lastUsedUsageAnchor      bool
+	lastReactiveAttempt      int
 }
 
 func (s *execution) encode() json.RawMessage {

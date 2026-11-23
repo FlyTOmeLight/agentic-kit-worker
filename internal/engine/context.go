@@ -1,9 +1,11 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/contextbuilder"
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
@@ -26,37 +28,81 @@ func decodeSnapshot(run *durable.Run) (*contextbuilder.Snapshot, error) {
 	if snapshot.Materials.SystemInstruction == "" && run.Spec.SystemPrompt != "" {
 		snapshot.Materials.SystemInstruction = run.Spec.SystemPrompt
 	}
-	if len(snapshot.Materials.History) == 0 && len(run.Spec.History) > 0 {
-		var groups []contextbuilder.MessageGroup
-		var currentGroup []contextbuilder.Message
-		for _, msg := range run.Spec.History {
-			currentGroup = append(currentGroup, contextbuilder.Message{
-				Role:    contextbuilder.Role(msg.Role),
-				Content: msg.Content,
-			})
-			if msg.Role == "assistant" {
-				groups = append(groups, contextbuilder.MessageGroup{
-					Source: contextbuilder.Source{
-						Kind: contextbuilder.SourceHistory,
-						ID:   fmt.Sprintf("hist-%d", len(groups)),
-					},
-					Messages: currentGroup,
-				})
-				currentGroup = nil
-			}
-		}
-		if len(currentGroup) > 0 {
-			groups = append(groups, contextbuilder.MessageGroup{
+	fillLegacyHistory(&snapshot, run.Spec.History)
+	return &snapshot, nil
+}
+
+func fillLegacyHistory(snapshot *contextbuilder.Snapshot, history []durable.Message) {
+	if len(snapshot.Materials.History) > 0 {
+		return
+	}
+	var group []contextbuilder.Message
+	pending := 0
+	addGroup := func() {
+		if len(group) > 0 {
+			snapshot.Materials.History = append(snapshot.Materials.History, contextbuilder.MessageGroup{
 				Source: contextbuilder.Source{
 					Kind: contextbuilder.SourceHistory,
-					ID:   fmt.Sprintf("hist-%d", len(groups)),
+					ID:   fmt.Sprintf("hist-%d", len(snapshot.Materials.History)),
 				},
-				Messages: currentGroup,
+				Messages: group,
 			})
+			group = nil
 		}
-		snapshot.Materials.History = groups
 	}
-	return &snapshot, nil
+	for _, msg := range history {
+		m := contextbuilder.Message{
+			Role:       contextbuilder.Role(msg.Role),
+			Content:    msg.Content,
+			ToolCallID: msg.ToolCallID,
+		}
+		for _, call := range msg.ToolCalls {
+			m.ToolCalls = append(
+				m.ToolCalls,
+				contextbuilder.ToolCall{ID: call.ID, Name: call.Name, Arguments: call.Arguments},
+			)
+		}
+		if m.Role == contextbuilder.RoleUser && len(group) > 0 && pending == 0 {
+			addGroup()
+		}
+		group = append(group, m)
+		switch m.Role {
+		case contextbuilder.RoleAssistant:
+			pending = len(m.ToolCalls)
+			if pending == 0 {
+				addGroup()
+			}
+		case contextbuilder.RoleTool:
+			if pending > 0 {
+				pending--
+			}
+		}
+	}
+	addGroup()
+}
+
+func (s *execution) modelSnapshot() *contextbuilder.Snapshot {
+	if s.snapshot != nil {
+		return s.snapshot
+	}
+	spec := s.run.Spec
+	budget := contextbuilder.Budget{
+		MaxInputBytes: 128 * 1024, MaxToolResultBytes: 16 * 1024,
+		CounterVersion: contextbuilder.CJKWeightedCounterVersion,
+	}
+	if spec.Model.ContextWindow > 0 && spec.Model.MaxTokens != nil {
+		budget.ContextWindow = spec.Model.ContextWindow
+		budget.OutputReserve = int64(*spec.Model.MaxTokens)
+		budget.MaxInputBytes = 0
+		budget.ProtocolOverheadTokens = 256
+		budget.MaxToolResultBytes = max(128, min(budget.MaxToolResultBytes, budget.InputTokenLimit()/2))
+	}
+	snapshot := &contextbuilder.Snapshot{
+		Materials: contextbuilder.FrozenMaterials{SystemInstruction: spec.SystemPrompt},
+		Policy:    contextbuilder.Policy{Version: contextbuilder.PolicyVersionV4}, Budget: budget,
+	}
+	fillLegacyHistory(snapshot, spec.History)
+	return snapshot
 }
 
 func toContextMessage(m *schema.Message) (contextbuilder.Message, error) {
@@ -126,102 +172,290 @@ func toSchemaMessage(m contextbuilder.Message) *schema.Message {
 	}
 }
 
-func toSchemaMessages(messages []contextbuilder.Message) []*schema.Message {
-	result := make([]*schema.Message, len(messages))
-	for i, m := range messages {
-		result[i] = toSchemaMessage(m)
-	}
-	return result
+// projectedTurn keeps the original Eino messages available for metadata and
+// uses durable sequence numbers only to select which messages reach the model.
+type projectedTurn struct {
+	messages  []contextbuilder.Message
+	originals map[string]*schema.Message
+	human     map[string]compactedPin
 }
 
-// buildContext selects materials and verifies input limits for the current
-// turn. When over budget, it omits low-priority memory and oldest history
-// turns. If required inputs exceed the budget, it returns a BudgetExceededError.
-func (s *execution) buildContext(
-	stateMessages []*schema.Message,
-	toolInfos []*schema.ToolInfo,
-) ([]*schema.Message, *durable.ContextInfo, error) {
-	if s.snapshot == nil {
-		return stateMessages, nil, nil
-	}
+type compactedPin struct {
+	Seq   int64                      `json:"seq"`
+	Block contextbuilder.PinnedBlock `json:"block"`
+}
 
-	var currentTurn []contextbuilder.Message
-	if len(stateMessages) > 0 {
-		for _, m := range stateMessages {
-			cmsg, err := toContextMessage(m)
-			if err != nil {
-				return nil, nil, err
+func interactionPin(row durable.SessionMessage) (compactedPin, bool) {
+	switch row.Kind {
+	case "ClarificationAnswer", "ReviewResult":
+		return compactedPin{Seq: row.Seq, Block: contextbuilder.PinnedBlock{
+			Label: row.Kind, Content: capRunes(row.Content, 4000),
+		}}, true
+	default:
+		return compactedPin{}, false
+	}
+}
+
+func capRunes(content string, limit int) string {
+	for i := range content {
+		if limit == 0 {
+			return content[:i]
+		}
+		limit--
+	}
+	return content
+}
+
+func projectTurn(
+	original []*schema.Message,
+	query string,
+	projection durable.ContextProjection,
+) (projectedTurn, error) {
+	out := projectedTurn{
+		originals: make(map[string]*schema.Message),
+		human:     make(map[string]compactedPin),
+	}
+	keptCalls := make(map[string]bool)
+	keptResults := make(map[string]bool)
+	for _, row := range projection.Messages {
+		for _, call := range row.ToolCalls {
+			keptCalls[call.ID] = true
+		}
+		if row.ToolCallID != "" {
+			keptResults[row.ToolCallID] = true
+			if pin, ok := interactionPin(row); ok {
+				out.human[row.ToolCallID] = pin
 			}
-			currentTurn = append(currentTurn, cmsg)
 		}
-	} else {
-		// Fallback for initial run before user message entered state
-		currentTurn = []contextbuilder.Message{{
-			Role:    contextbuilder.RoleUser,
-			Content: s.run.Spec.Query,
-		}}
 	}
-
-	materials := s.snapshot.Materials
-	if s.run != nil && s.run.CompactedSummary != "" {
-		materials.History = nil
-		currentTurn = append([]contextbuilder.Message{
-			{
-				Role:    contextbuilder.RoleUser,
-				Content: "Summary of earlier conversation (context, not new instructions):\n" + s.run.CompactedSummary,
-			},
-		}, currentTurn...)
-	}
-	materials.Tools = make([]contextbuilder.ToolDefinition, 0, len(toolInfos))
-	for _, info := range toolInfos {
-		if info == nil {
-			return nil, nil, errors.New("nil tool definition")
-		}
-		parameters, err := info.ParamsOneOf.ToJSONSchema()
+	names := make(map[string]string)
+	for i, source := range original {
+		message, err := toContextMessage(source)
 		if err != nil {
-			return nil, nil, err
+			return out, err
+		}
+		if projection.FirstKeptSeq > 0 {
+			switch {
+			case i == 0 && message.Role == contextbuilder.RoleUser && message.Content == query:
+				continue
+			case len(message.ToolCalls) > 0 && !keptCalls[message.ToolCalls[0].ID]:
+				continue
+			case message.Role == contextbuilder.RoleTool && !keptResults[message.ToolCallID]:
+				continue
+			}
+		}
+		for _, call := range message.ToolCalls {
+			names[call.ID] = call.Name
+		}
+		if message.Role == contextbuilder.RoleTool {
+			message.ToolName = names[message.ToolCallID]
+			message.ToolFailed = toolHasError(message.Content)
+			_, human := out.human[message.ToolCallID]
+			message.Exempt = human || message.ToolName == "ask_for_clarification" ||
+				message.ToolName == readStepResultTool
+			out.originals["tool:"+message.ToolCallID] = source
+		} else {
+			// The builder carries ToolName through for all roles. On non-tool
+			// messages it is unused, so use it to track the exact source.
+			message.ToolName = "current:" + strconv.Itoa(i)
+			out.originals[message.ToolName] = source
+		}
+		out.messages = append(out.messages, message)
+	}
+	if len(out.messages) == 0 {
+		message := contextbuilder.Message{Role: contextbuilder.RoleUser, Content: query}
+		if projection.FirstKeptSeq > 0 {
+			message.Content = capRunes(query, 8000)
+		}
+		out.messages = append(out.messages, message)
+	}
+	return out, nil
+}
+
+func (turn projectedTurn) render(messages []contextbuilder.Message) []*schema.Message {
+	out := make([]*schema.Message, 0, len(messages))
+	for _, message := range messages {
+		key := message.ToolName
+		if message.Role == contextbuilder.RoleTool {
+			key = "tool:" + message.ToolCallID
+		}
+		if source := turn.originals[key]; source != nil {
+			copy := *source
+			copy.Content = message.Content
+			if len(message.ToolCalls) > 0 {
+				copy.ToolCalls = append([]schema.ToolCall(nil), source.ToolCalls...)
+				for i, call := range message.ToolCalls {
+					copy.ToolCalls[i].Function.Arguments = call.Arguments
+				}
+			}
+			out = append(out, &copy)
+		} else {
+			out = append(out, toSchemaMessage(message))
+		}
+	}
+	return out
+}
+
+// Legacy Eino checkpoints may still include the old injected system/history
+// prefix. New checkpoints start at the current run's user query.
+func (s *execution) currentRunMessages(input []*schema.Message) []*schema.Message {
+	if s.snapshot == nil && len(input) > len(s.run.Spec.History)+1 && input[0] != nil &&
+		input[0].Role == schema.System {
+		return input[len(s.run.Spec.History)+1:]
+	}
+	return input
+}
+
+func (s *execution) prepareModelInput(
+	ctx context.Context, stateMessages []*schema.Message, tools []*schema.ToolInfo,
+	reactiveAttempt int, targetTokens, targetBytes int64,
+) ([]*schema.Message, *durable.ContextInfo, int64, error) {
+	snapshot := s.modelSnapshot()
+	budget := snapshot.Budget
+	if budget.CounterVersion == "" {
+		budget.CounterVersion = contextbuilder.CJKWeightedCounterVersion
+	}
+	counter, err := contextbuilder.ResolveCounter(budget.CounterVersion)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	projection := durable.ContextProjection{}
+	if s.store != nil {
+		projection, err = s.store.CompactionContext(ctx, s.run.Lease())
+		if err != nil {
+			return nil, nil, 0, err
+		}
+	}
+	in := contextbuilder.BuildInput{
+		FrozenMaterials: snapshot.Materials, Policy: snapshot.Policy, Budget: budget, Counter: counter,
+		Steers: s.state.Steers,
+	}
+	in.FrozenMaterials.Tools = make([]contextbuilder.ToolDefinition, 0, len(tools))
+	for _, tool := range tools {
+		if tool == nil {
+			return nil, nil, 0, errors.New("nil tool definition")
+		}
+		parameters, err := tool.ParamsOneOf.ToJSONSchema()
+		if err != nil {
+			return nil, nil, 0, err
 		}
 		encoded, err := json.Marshal(parameters)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
-		materials.Tools = append(materials.Tools, contextbuilder.ToolDefinition{
-			Name: info.Name, Description: info.Desc, Parameters: encoded,
+		in.FrozenMaterials.Tools = append(in.FrozenMaterials.Tools, contextbuilder.ToolDefinition{
+			Name: tool.Name, Description: tool.Desc, Parameters: encoded,
 		})
-	}
-	counter, err := contextbuilder.ResolveCounter(s.snapshot.Budget.CounterVersion)
-	if err != nil {
-		return nil, nil, err
-	}
-	result, err := contextbuilder.Build(contextbuilder.BuildInput{
-		FrozenMaterials: materials,
-		CurrentTurn:     currentTurn,
-		Policy:          s.snapshot.Policy,
-		Budget:          s.snapshot.Budget,
-		Counter:         counter,
-	})
-	if err != nil {
-		return nil, nil, err
 	}
 
-	// Map contextbuilder sources to the execution-layer ContextInfo type.
-	var omitted []durable.Source
-	for _, o := range result.OmittedSources {
-		omitted = append(omitted, durable.Source{
-			Kind:     string(o.Source.Kind),
-			ID:       o.Source.ID,
-			Revision: o.Source.Revision,
-			Version:  o.Source.Version,
-		})
+	original := s.currentRunMessages(stateMessages)
+	query := s.run.Spec.Query
+	prepareTurn := func() (projectedTurn, error) {
+		turn, err := projectTurn(original, query, projection)
+		in.CurrentTurn = turn.messages
+		in.CompactedSummary = projection.Summary
+		in.PinnedBlocks = nil
+		if projection.FirstKeptSeq > 0 && len(turn.messages) > 0 &&
+			(turn.messages[0].Role != contextbuilder.RoleUser || turn.messages[0].Content != capRunes(query, 8000)) {
+			in.PinnedBlocks = append(
+				in.PinnedBlocks,
+				contextbuilder.PinnedBlock{Label: "query", Content: capRunes(query, 8000)},
+			)
+		}
+		for _, pin := range s.state.CompactedInteractionPins {
+			if pin.Seq < projection.FirstKeptSeq {
+				in.PinnedBlocks = append(in.PinnedBlocks, pin.Block)
+			}
+		}
+		return turn, err
 	}
-	var collapsed []durable.Source
-	for _, c := range result.CollapsedSources {
-		collapsed = append(collapsed, durable.Source{
-			Kind:     string(c.Kind),
-			ID:       c.ID,
-			Revision: c.Revision,
-			Version:  c.Version,
-		})
+	turn, err := prepareTurn()
+	if err != nil {
+		return nil, nil, 0, err
+	}
+
+	// Measure before budget-driven reductions so earlier omission cannot
+	// hide pressure from the proactive threshold or the usage anchor.
+	baseline := in
+	baseline.Budget.ContextWindow = 0
+	baseline.Budget.OutputReserve = 0
+	baseline.Budget.MaxInputTokens = 0
+	baseline.Budget.MaxInputBytes = 0
+	measured, err := contextbuilder.Build(baseline)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	estimated := measured.Usage.InputTokens
+	usedAnchor := false
+	anchored := estimated
+	if anchor := s.state.UsageAnchor; anchor != nil && anchor.Turn == s.state.Turn-1 &&
+		anchor.PromptTokens > 0 && estimated >= anchor.EstimatedInputTokens {
+		anchored = anchor.PromptTokens + (estimated - anchor.EstimatedInputTokens)
+		usedAnchor = true
+	}
+	tokenLimit, byteLimit := budget.InputTokenLimit(), budget.InputByteLimit()
+	byteTrigger := byteLimit
+	if budget.ContextWindow == 0 && s.compactionMaxBytes > 0 &&
+		(byteTrigger == 0 || int64(s.compactionMaxBytes) < byteTrigger) {
+		byteTrigger = int64(s.compactionMaxBytes)
+	}
+	triggered := (tokenLimit > 0 && max(estimated, anchored) >= max(1, tokenLimit*9/10)) ||
+		(byteTrigger > 0 && measured.Usage.InputBytes >= max(1, byteTrigger*9/10))
+	if reactiveAttempt == 0 && triggered {
+		if tokenLimit > 0 {
+			targetTokens = max(1, tokenLimit/2)
+		}
+		if byteTrigger > 0 {
+			targetBytes = max(1, byteTrigger/2)
+		}
+	}
+
+	in.TargetInputTokens, in.TargetInputBytes = targetTokens, targetBytes
+	result := measured
+	result.Usage.TokenLimit, result.Usage.ByteLimit = tokenLimit, byteLimit
+	result.Usage.OutputReserve = budget.OutputReserve
+	if targetTokens > 0 || targetBytes > 0 || reactiveAttempt > 0 ||
+		(budget.ContextWindow > 0 && budget.OutputReserve >= budget.ContextWindow) {
+		result, err = contextbuilder.Build(in)
+	}
+	if needsCompression(result, err) && s.summarizer != nil && s.store != nil &&
+		s.state.SummaryConsecutiveFailures < summaryFailureLimit && reactiveAttempt <= 3 {
+		var compactErr error
+		projection, compactErr = s.compactContext(
+			ctx,
+			snapshot,
+			projection,
+			counter,
+			reactiveAttempt,
+			targetTokens,
+			targetBytes,
+		)
+		if compactErr != nil {
+			return nil, nil, 0, compactErr
+		}
+		turn, err = prepareTurn()
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		result, err = contextbuilder.Build(in)
+	}
+	if needsCompression(result, err) {
+		in.AllowDropCurrentRounds = true
+		in.CurrentTurn = append([]contextbuilder.Message(nil), in.CurrentTurn...)
+		for i := range in.CurrentTurn {
+			message := &in.CurrentTurn[i]
+			if pin, ok := turn.human[message.ToolCallID]; ok {
+				in.PinnedBlocks = append(in.PinnedBlocks, pin.Block)
+				message.Content = "[See pinned " + pin.Block.Label + "]"
+			}
+			if i == 0 && message.Role == contextbuilder.RoleUser && message.Content == query {
+				message.Content = capRunes(query, 8000)
+			}
+		}
+		result, err = contextbuilder.Build(in)
+	}
+	if err != nil {
+		return nil, nil, 0, err
 	}
 	info := &durable.ContextInfo{
 		InputTokens:          result.Usage.InputTokens,
@@ -229,16 +463,29 @@ func (s *execution) buildContext(
 		TokenLimit:           result.Usage.TokenLimit,
 		ByteLimit:            result.Usage.ByteLimit,
 		OutputReserve:        result.Usage.OutputReserve,
-		OmittedSources:       omitted,
-		CollapsedSources:     collapsed,
+		LadderPreviewed:      result.LadderPreviewed,
+		LadderStubbed:        result.LadderStubbed,
+		DroppedRounds:        result.DroppedRounds,
 		ProjectedToolResults: result.ProjectedToolResults,
+		UsedUsageAnchor:      usedAnchor,
+		ReactiveAttempt:      reactiveAttempt,
+		SummaryBreakerOpen:   s.state.SummaryConsecutiveFailures >= summaryFailureLimit,
 	}
-	messages := toSchemaMessages(result.Messages)
-	offset := len(messages) - len(stateMessages)
-	for index, original := range stateMessages {
-		preserved := *original
-		preserved.Content = messages[offset+index].Content
-		messages[offset+index] = &preserved
+	source := func(src contextbuilder.Source) durable.Source {
+		return durable.Source{Kind: string(src.Kind), ID: src.ID, Revision: src.Revision, Version: src.Version}
 	}
-	return messages, info, nil
+	for _, omitted := range result.OmittedSources {
+		info.OmittedSources = append(info.OmittedSources, source(omitted.Source))
+	}
+	for _, collapsed := range result.CollapsedSources {
+		info.CollapsedSources = append(info.CollapsedSources, source(collapsed))
+	}
+	s.lastEstimatedInputTokens = result.Usage.InputTokens
+	s.lastUsedUsageAnchor = usedAnchor
+	s.lastReactiveAttempt = reactiveAttempt
+	return turn.render(result.Messages), info, result.Usage.InputTokens, nil
+}
+
+func needsCompression(result contextbuilder.BuildResult, err error) bool {
+	return (err == nil && !result.TargetMet) || errors.Is(err, contextbuilder.ErrBudgetExceeded)
 }

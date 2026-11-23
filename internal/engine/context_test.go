@@ -31,7 +31,10 @@ func sampleSnapshot(t *testing.T, budget contextbuilder.Budget) durable.ContextS
 						Kind: contextbuilder.SourceMemory,
 						ID:   "mem-low",
 					},
-					Content:  "Low priority reference info.",
+					Content: "Low priority reference info. " + strings.Repeat(
+						"older material ",
+						115,
+					),
 					Priority: 10,
 				},
 				{
@@ -65,7 +68,7 @@ func sampleSnapshot(t *testing.T, budget contextbuilder.Budget) durable.ContextS
 				},
 			},
 		},
-		Policy: contextbuilder.Policy{Version: contextbuilder.PolicyVersionV1},
+		Policy: contextbuilder.Policy{Version: contextbuilder.PolicyVersionV4},
 		Budget: budget,
 	})
 	if err != nil {
@@ -144,7 +147,7 @@ func TestEinoTrimsContextUnderBudget(t *testing.T) {
 	claimed := getClaim(t, s)
 	// Set byte budget small enough that lowest-priority memory must be trimmed
 	claimed.ContextSnapshot = sampleSnapshot(t, contextbuilder.Budget{
-		MaxInputBytes: 550,
+		MaxInputBytes: 2200,
 	})
 
 	var modelCalls int
@@ -226,9 +229,9 @@ func TestEinoFailsWhenToolOutputExceedsBudgetDuringExecution(t *testing.T) {
 	r := submit(t, s, "read", durable.ReadOnly)
 
 	claimed := getClaim(t, s)
-	// Budget allows initial prompt (~300 bytes), but will not tolerate an enormous tool response
+	// Budget allows initial prompt and restore tool schema, but will not tolerate an enormous tool response
 	claimed.ContextSnapshot = sampleSnapshot(t, contextbuilder.Budget{
-		MaxInputBytes: 450,
+		MaxInputBytes: 1000,
 	})
 
 	var modelCalls int
@@ -259,7 +262,7 @@ func TestEinoFailsWhenToolOutputExceedsBudgetDuringExecution(t *testing.T) {
 					Tool: &fakeTool{
 						name: "read",
 						invoke: func(_ context.Context, _ string) (string, error) {
-							// Return gigantic tool result that blows through the 450-byte budget
+							// Return gigantic tool result that blows through the 1,000-byte budget
 							return strings.Repeat("huge tool output block ", 50), nil
 						},
 					},

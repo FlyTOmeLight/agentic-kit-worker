@@ -3,7 +3,7 @@ module github.com/FlyTOmeLight/agentic-kit-worker
 go 1.27.1
 
 require (
-	github.com/FlyTOmeLight/agentic-kit-api v0.5.3-0.20261118063535-976d52654d70
+	github.com/FlyTOmeLight/agentic-kit-api v0.5.3-0.20261123163623-54922f0852cf
 	github.com/FlyTOmeLight/server-go v0.13.0
 	github.com/agent-infra/sandbox-sdk-go v0.0.5
 	github.com/cloudwego/eino v0.9.2
@@ -11,6 +11,7 @@ require (
 	github.com/eino-contrib/jsonschema v1.0.3
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/meguminnnnnnnnn/go-openai v0.1.2
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	gorm.io/driver/postgres v1.6.3
 	gorm.io/gorm v1.31.2
@@ -64,7 +65,6 @@ require (
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mattn/go-sqlite3 v1.14.52 // indirect
-	github.com/meguminnnnnnnnn/go-openai v0.1.2 // indirect
 	github.com/mitchellh/mapstructure v1.5.1-0.20220423185008-bf980b35cac4 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect

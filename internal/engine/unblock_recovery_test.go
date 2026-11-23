@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	openai "github.com/meguminnnnnnnnn/go-openai"
 
 	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
@@ -24,8 +26,8 @@ func TestUnblockResumesWithoutRepeatingCompletedTools(t *testing.T) {
 		tokens     int64
 	}{
 		{name: "model nil response with error", kind: "model", tools: 1, tokens: 2},
-		{name: "summary error without usage", kind: "summary", summaryErr: errors.New("summary transport reset"), tools: 3, tokens: 10},
-		{name: "summary success without usage", kind: "summary", tools: 3, tokens: 10},
+		{name: "summary error without usage", kind: "summary", summaryErr: errors.New("summary transport reset"), tools: 2, tokens: 9},
+		{name: "summary success without usage", kind: "summary", tools: 2, tokens: 9},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			store, dsn := testDB(t)
@@ -195,7 +197,7 @@ func TestUnblockResumesWithoutRepeatingCompletedTools(t *testing.T) {
 			}
 			wantModels, wantSummaries := 3, 0
 			if testCase.kind == "summary" {
-				wantModels, wantSummaries = 4, 2
+				wantModels, wantSummaries = 3, 2
 			}
 			if done.Status != durable.Completed || done.Output != "resumed after approval" ||
 				doneState.InflightModel != nil || tools != testCase.tools || models != wantModels ||
@@ -241,6 +243,89 @@ func TestUnblockResumesWithoutRepeatingCompletedTools(t *testing.T) {
 			}
 			if unblocked != 1 || retries != 0 {
 				t.Fatalf("unblocked=%d retries=%d", unblocked, retries)
+			}
+		})
+	}
+}
+
+func TestMainModelUnknownConsumptionStillRequiresUnblock(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		msg  *schema.Message
+		err  error
+	}{
+		{name: "HTTP 502", err: &openai.APIError{HTTPStatusCode: 502, Code: "context_length_exceeded", Message: "context window"}},
+		{name: "connection reset", err: syscall.ECONNRESET},
+		{name: "missing usage", msg: schema.AssistantMessage("unaccounted response", nil)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, _ := testDB(t)
+			ctx := context.Background()
+			run := submit(t, store, "lookup", durable.ReadOnly)
+			dispatches := 0
+			worker := &engine.Engine{
+				Store: store,
+				Build: func(context.Context, *durable.Store, durable.Spec) (model.ToolCallingChatModel, map[string]engine.Binding, error) {
+					base := &usageModel{
+						disableCallbacks: true,
+						generate: func() (*schema.Message, error) {
+							dispatches++
+							if dispatches == 1 {
+								return test.msg, test.err
+							}
+							msg := schema.AssistantMessage("after unblock", nil)
+							msg.ResponseMeta = &schema.ResponseMeta{
+								Usage: &schema.TokenUsage{
+									PromptTokens:     12,
+									CompletionTokens: 3,
+								},
+							}
+							return msg, nil
+						},
+					}
+					return base, map[string]engine.Binding{
+						"lookup": {Policy: durable.ReadOnly, Tool: &fakeTool{name: "lookup"}},
+					}, nil
+				},
+			}
+			if err := worker.Execute(ctx, claimForCompression(t, store)); err != nil {
+				t.Fatal(err)
+			}
+			blocked, state, events := compressionResult(t, store, run)
+			if blocked.Status != durable.Blocked || state.InflightModel == nil ||
+				state.InflightModel.Kind != "model" ||
+				dispatches != 1 ||
+				events.counts["ModelOverflowRejected"] > 0 {
+				t.Fatalf(
+					"status=%s error=%q inflight=%+v dispatches=%d",
+					blocked.Status,
+					blocked.Error,
+					state.InflightModel,
+					dispatches,
+				)
+			}
+			if err := store.Unblock(
+				ctx,
+				run.OwnerID,
+				run.ID,
+				blocked.Epoch,
+				"Reviewed unknown consumption",
+			); err != nil {
+				t.Fatal(err)
+			}
+			if err := worker.Execute(ctx, claimForCompression(t, store)); err != nil {
+				t.Fatal(err)
+			}
+			done, state, _ := compressionResult(t, store, run)
+			if done.Status != durable.Completed || state.InflightModel != nil || dispatches != 2 ||
+				done.TokensUsed != 15 {
+				t.Fatalf(
+					"status=%s error=%q inflight=%+v dispatches=%d",
+					done.Status,
+					done.Error,
+					state.InflightModel,
+					dispatches,
+				)
 			}
 		})
 	}

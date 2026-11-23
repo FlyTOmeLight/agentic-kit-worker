@@ -22,7 +22,7 @@ func TestEinoPreviewsToolOutputAndStoresOriginal(t *testing.T) {
 	claimed := getClaim(t, store)
 	claimed.ContextSnapshot = sampleSnapshot(t, contextbuilder.Budget{
 		ContextWindow: 2000, OutputReserve: 200, ProtocolOverheadTokens: 256,
-		CounterVersion: contextbuilder.ByteEstimateVersion, MaxToolResultBytes: 256,
+		CounterVersion: contextbuilder.CJKWeightedCounterVersion, MaxToolResultBytes: 256,
 	})
 	original := strings.Repeat("完整工具结果αβγ ", 500)
 	modelCalls := 0
@@ -95,8 +95,8 @@ func TestEinoReducesHistoryInTwoLevels(t *testing.T) {
 		limit      int64
 		keepAnswer bool
 	}{
-		{name: "retain question and final answer", limit: 220, keepAnswer: true},
-		{name: "remove whole oldest turn", limit: 120},
+		{name: "retain question and final answer", limit: 1450, keepAnswer: true},
+		{name: "remove whole oldest turn", limit: 1250},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, _ := testDB(t)
@@ -111,7 +111,7 @@ func TestEinoReducesHistoryInTwoLevels(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			decoded.Policy.Version = contextbuilder.PolicyVersionV2
+			decoded.Materials.History[0].Messages[2].Content = strings.Repeat("historical result ", 100)
 			envelope, err := contextbuilder.EncodeSnapshot(decoded)
 			if err != nil {
 				t.Fatal(err)
