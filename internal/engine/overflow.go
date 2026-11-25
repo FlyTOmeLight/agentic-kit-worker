@@ -77,3 +77,42 @@ func hasOverflowPhrase(message string) bool {
 	}
 	return false
 }
+
+func isStreamOptionsUnsupportedError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return false
+	}
+	var network net.Error
+	if errors.As(err, &network) && network.Timeout() {
+		return false
+	}
+	var request *openai.RequestError
+	if errors.As(err, &request) && request.HTTPStatusCode != 0 {
+		return request.HTTPStatusCode == http.StatusBadRequest &&
+			hasStreamOptionsPhrase(string(request.Body)+" "+fmt.Sprint(request.Err))
+	}
+	var api *openai.APIError
+	if errors.As(err, &api) {
+		if api.HTTPStatusCode != 0 && api.HTTPStatusCode != http.StatusBadRequest {
+			return false
+		}
+		param := ""
+		if api.Param != nil {
+			param = *api.Param
+		}
+		return hasStreamOptionsPhrase(param + " " + fmt.Sprint(api.Code) + " " + api.Message)
+	}
+	detail := strings.ToLower(err.Error())
+	if status := rejectedStatus.FindStringSubmatch(detail); len(status) > 0 && status[1] != "400" {
+		return false
+	}
+	return hasStreamOptionsPhrase(detail) &&
+		(badRequestCode.MatchString(detail) || strings.Contains(detail, "bad request"))
+}
+
+func hasStreamOptionsPhrase(message string) bool {
+	detail := strings.ToLower(message)
+	return strings.Contains(detail, "stream_options") || strings.Contains(detail, "include_usage")
+}

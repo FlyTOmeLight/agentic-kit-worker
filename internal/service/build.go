@@ -87,5 +87,6 @@ func newEngine(cfg *config.Config, store *durable.Store) (*engine.Engine, error)
 		Build:              adapters.Build,
 		Summarizer:         adapters.Summarizer{},
 		CompactionMaxBytes: cfg.Compaction.MaxInputBytes,
+		StreamIdleTimeout:  cfg.Worker.StreamIdleTimeout,
 	}, nil
 }

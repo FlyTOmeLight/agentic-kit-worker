@@ -40,9 +40,10 @@ type CompactionConfig struct {
 }
 
 type WorkerConfig struct {
-	Concurrency int
-	Lease       time.Duration
-	Poll        time.Duration
+	Concurrency       int
+	Lease             time.Duration
+	Poll              time.Duration
+	StreamIdleTimeout time.Duration
 }
 
 // EvaluatorConfig configures the optional sandbox-backed goal evaluator.
@@ -82,6 +83,9 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Worker.Poll <= 0 {
 		return errors.New("Worker.Poll must be positive")
+	}
+	if cfg.Worker.StreamIdleTimeout < 0 {
+		return errors.New("Worker.StreamIdleTimeout must not be negative")
 	}
 	if cfg.Evaluator.BaseURL != "" && cfg.Evaluator.TokenEnv == "" {
 		return errors.New("Evaluator.TokenEnv is required when BaseURL is set")

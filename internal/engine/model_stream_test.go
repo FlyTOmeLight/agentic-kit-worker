@@ -214,3 +214,141 @@ func TestHTTPModelStreamFailureBlocks(t *testing.T) {
 		})
 	}
 }
+
+func TestHTTPModelStreamDisabledUsesGenerate(t *testing.T) {
+	store, _ := testDB(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var payload struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		if payload.Stream {
+			t.Errorf("expected non-streaming request when model.stream=false")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(
+			w,
+			`{"id":"reply","choices":[{"index":0,"message":{"role":"assistant","content":"非流式答案"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`,
+		)
+	}))
+	defer upstream.Close()
+	disabled := false
+	run := submit(t, store, "lookup", durable.ReadOnly, func(spec *durable.Spec) {
+		spec.Model.BaseURL = upstream.URL
+		spec.Model.Stream = &disabled
+	})
+	publisher := &capturedDeltas{}
+	executor := &engine.Engine{
+		Store: store, Build: adapters.Build,
+		NewDeltaPublisher: func(context.Context) engine.DeltaPublisher { return publisher },
+	}
+	if err := executor.Execute(ctx, claimForCompression(t, store)); err != nil {
+		t.Fatal(err)
+	}
+	finished, state, _ := compressionResult(t, store, run)
+	if calls != 1 || finished.Status != durable.Completed || finished.Output != "非流式答案" ||
+		finished.TokensUsed != 6 || state.InflightModel != nil || state.StreamFallback || len(publisher.deltas) != 0 {
+		t.Fatalf("calls=%d run=%+v state=%+v deltas=%+v", calls, finished, state, publisher.deltas)
+	}
+}
+
+func TestHTTPModelStreamOptionsUnsupportedFallsBackToGenerate(t *testing.T) {
+	store, _ := testDB(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer toolServer.Close()
+
+	var streamFlags []bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		streamFlags = append(streamFlags, payload.Stream)
+		w.Header().Set("Content-Type", "application/json")
+		if payload.Stream {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(
+				w,
+				`{"error":{"message":"Unrecognized request argument supplied: stream_options","type":"invalid_request_error","param":"stream_options"}}`,
+			)
+			return
+		}
+		if len(streamFlags) == 2 {
+			fmt.Fprint(
+				w,
+				`{"id":"turn0","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`,
+			)
+			return
+		}
+		fmt.Fprint(
+			w,
+			`{"id":"turn1","choices":[{"index":0,"message":{"role":"assistant","content":"回退成功"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`,
+		)
+	}))
+	defer upstream.Close()
+	run := submit(t, store, "lookup", durable.ReadOnly, func(spec *durable.Spec) {
+		spec.Model.BaseURL = upstream.URL
+		spec.Tools[0].URL = toolServer.URL
+	})
+	publisher := &capturedDeltas{}
+	executor := &engine.Engine{
+		Store: store, Build: adapters.Build,
+		NewDeltaPublisher: func(context.Context) engine.DeltaPublisher { return publisher },
+	}
+	if err := executor.Execute(ctx, claimForCompression(t, store)); err != nil {
+		t.Fatal(err)
+	}
+	finished, state, _ := compressionResult(t, store, run)
+	// Request 1: stream rejected with 400 -> Request 2: non-stream tool call -> Request 3: next turn goes straight to non-stream.
+	if len(streamFlags) != 3 || !streamFlags[0] || streamFlags[1] || streamFlags[2] {
+		t.Fatalf("unexpected request stream sequence: %v", streamFlags)
+	}
+	if finished.Status != durable.Completed || finished.Output != "回退成功" ||
+		finished.TokensUsed != 11 || state.InflightModel != nil || !state.StreamFallback || len(publisher.deltas) != 0 {
+		t.Fatalf("run=%+v state=%+v deltas=%+v", finished, state, publisher.deltas)
+	}
+}
+
+func TestHTTPModelOtherBadRequestDoesNotFallbackToGenerate(t *testing.T) {
+	store, _ := testDB(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		checkStreamRequest(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(
+			w,
+			`{"error":{"message":"invalid model name","type":"invalid_request_error","param":"model"}}`,
+		)
+	}))
+	defer upstream.Close()
+	run := submit(t, store, "lookup", durable.ReadOnly, func(spec *durable.Spec) {
+		spec.Model.BaseURL = upstream.URL
+	})
+	executor := &engine.Engine{Store: store, Build: adapters.Build}
+	if err := executor.Execute(ctx, claimForCompression(t, store)); err != nil {
+		t.Fatal(err)
+	}
+	finished, state, _ := compressionResult(t, store, run)
+	if calls != 1 || finished.Status != durable.Blocked || state.InflightModel == nil || state.StreamFallback {
+		t.Fatalf("calls=%d run=%+v state=%+v", calls, finished, state)
+	}
+}

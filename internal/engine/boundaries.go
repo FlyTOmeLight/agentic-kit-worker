@@ -46,17 +46,41 @@ type boundaryModel struct {
 func (m *boundaryModel) Generate(
 	ctx context.Context, input []*schema.Message, opts ...model.Option,
 ) (*schema.Message, error) {
-	return m.call(ctx, input, m.collectStream, opts...)
+	return m.call(ctx, input, opts...)
 }
 
 func (m *boundaryModel) Stream(
 	ctx context.Context, input []*schema.Message, opts ...model.Option,
 ) (*schema.StreamReader[*schema.Message], error) {
-	msg, err := m.call(ctx, input, m.collectStream, opts...)
+	msg, err := m.call(ctx, input, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func (m *boundaryModel) useStreaming() bool {
+	return m.execution.run.Spec.Model.Streaming() && !m.execution.state.StreamFallback
+}
+
+func (m *boundaryModel) generateOnce(
+	ctx context.Context, input []*schema.Message, opts ...model.Option,
+) (result *schema.Message, resultErr error) {
+	if !components.IsCallbacksEnabled(m.BaseChatModel) {
+		ctx = callbacks.OnStart(ctx, input)
+		defer func() {
+			if resultErr != nil {
+				callbacks.OnError(ctx, resultErr)
+				return
+			}
+			callbacks.OnEnd(ctx, result)
+		}()
+	}
+	msg, err := m.BaseChatModel.Generate(ctx, input, opts...)
+	if err == nil && msg != nil {
+		adk.EnsureMessageID(msg)
+	}
+	return msg, err
 }
 
 func (m *boundaryModel) collectStream(
@@ -153,9 +177,7 @@ func (m *boundaryModel) collectStream(
 }
 
 func (m *boundaryModel) call(
-	ctx context.Context, input []*schema.Message,
-	dispatch func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error),
-	opts ...model.Option,
+	ctx context.Context, input []*schema.Message, opts ...model.Option,
 ) (*schema.Message, error) {
 	s := m.execution
 	if err := s.checkPricing(ctx); err != nil {
@@ -174,8 +196,22 @@ func (m *boundaryModel) call(
 		if err != nil {
 			return nil, err
 		}
-		msg, callErr := dispatch(ctx, prepared, opts...)
+		streaming := m.useStreaming()
+		var msg *schema.Message
+		var callErr error
+		if streaming {
+			msg, callErr = m.collectStream(ctx, prepared, opts...)
+		} else {
+			msg, callErr = m.generateOnce(ctx, prepared, opts...)
+		}
 		generated := msg != nil && (msg.Content != "" || msg.ReasoningContent != "" || len(msg.ToolCalls) > 0)
+		if streaming && callErr != nil && !generated && !hasModelUsage(msg) &&
+			isStreamOptionsUnsupportedError(callErr) {
+			s.state.StreamFallback = true
+			msg, callErr = m.generateOnce(ctx, prepared, opts...)
+			generated = msg != nil &&
+				(msg.Content != "" || msg.ReasoningContent != "" || len(msg.ToolCalls) > 0)
+		}
 		if generated || hasModelUsage(msg) || !isContextOverflowError(callErr) {
 			// Match Eino's bypassed callback wrapper, which drops partial messages
 			// returned alongside an error when the underlying model disables callbacks.

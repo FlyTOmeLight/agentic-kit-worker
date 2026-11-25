@@ -26,6 +26,7 @@ ConnMaxIdleTime = 300
 Concurrency = "${env:WORKER_CONCURRENCY:4}"
 Lease = "${env:WORKER_LEASE:30s}"
 Poll = "${env:WORKER_POLL:1s}"
+StreamIdleTimeout = "${env:WORKER_STREAM_IDLE_TIMEOUT:2m}"
 
 [Compaction]
 MaxInputBytes = "${env:COMPACTION_MAX_INPUT_BYTES:65536}"

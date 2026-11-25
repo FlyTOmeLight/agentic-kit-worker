@@ -44,6 +44,7 @@ type State struct {
 	ReturnDirectlyStep         string          `json:"returnDirectlyStep,omitempty"`
 	Final                      *string         `json:"final,omitempty"`
 	Steers                     []string        `json:"steers,omitempty"`
+	StreamFallback             bool            `json:"streamFallback,omitempty"`
 }
 
 type execution struct {
