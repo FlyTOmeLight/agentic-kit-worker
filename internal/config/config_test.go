@@ -53,6 +53,9 @@ func TestFrameworkConfig(t *testing.T) {
 	if cfg.DB.MaxOpenConns != 20 || cfg.DB.MaxIdleConns != 5 || cfg.DB.AutoMigrate {
 		t.Fatal("framework database configuration not decoded")
 	}
+	if len(cfg.Redis.Addrs) != 0 {
+		t.Fatalf("Redis must default to disabled: %v", cfg.Redis.Addrs)
+	}
 }
 
 func TestFrameworkSnapshot(t *testing.T) {

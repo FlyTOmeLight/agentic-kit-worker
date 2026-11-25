@@ -10,6 +10,8 @@ import (
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -18,12 +20,22 @@ import (
 	sandboxAdapter "github.com/FlyTOmeLight/agentic-kit-worker/internal/adapters/sandbox"
 )
 
+const (
+	defaultStreamIdleTimeout = 2 * time.Minute
+	streamFlushTimeout       = 200 * time.Millisecond
+)
+
+var errStreamIdleTimeout = errors.New("model stream idle timeout")
+
+// WrapModel binds boundaryModel directly around s.model so collectStream controls
+// streaming and callback delivery. Do not enable ADK ModelFailoverConfig alongside
+// this wrapper, because failover lives in the bypassed inner ADK layer.
 func (s *execution) WrapModel(
 	_ context.Context,
-	m model.BaseChatModel,
+	_ model.BaseChatModel,
 	_ *adk.ModelContext,
 ) (model.BaseChatModel, error) {
-	return &boundaryModel{BaseChatModel: m, execution: s}, nil
+	return &boundaryModel{BaseChatModel: s.model, execution: s}, nil
 }
 
 type boundaryModel struct {
@@ -34,13 +46,7 @@ type boundaryModel struct {
 func (m *boundaryModel) Generate(
 	ctx context.Context, input []*schema.Message, opts ...model.Option,
 ) (*schema.Message, error) {
-	return m.call(
-		ctx,
-		input,
-		func(ctx context.Context, prepared []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-			return m.BaseChatModel.Generate(ctx, prepared, opts...)
-		},
-		opts...)
+	return m.call(ctx, input, m.collectStream, opts...)
 }
 
 func (m *boundaryModel) Stream(
@@ -55,24 +61,76 @@ func (m *boundaryModel) Stream(
 
 func (m *boundaryModel) collectStream(
 	ctx context.Context, input []*schema.Message, opts ...model.Option,
-) (*schema.Message, error) {
-	reader, err := m.BaseChatModel.Stream(ctx, input, opts...)
+) (result *schema.Message, resultErr error) {
+	if !components.IsCallbacksEnabled(m.BaseChatModel) {
+		ctx = callbacks.OnStart(ctx, input)
+		defer func() {
+			if resultErr != nil {
+				callbacks.OnError(ctx, resultErr)
+				return
+			}
+			callbacks.OnEnd(ctx, result)
+		}()
+	}
+	streamCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	idleTimeout := m.execution.streamIdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = defaultStreamIdleTimeout
+	}
+	timer := time.AfterFunc(idleTimeout, func() { cancel(errStreamIdleTimeout) })
+	defer timer.Stop()
+	reader, err := m.BaseChatModel.Stream(streamCtx, input, opts...)
+	if reader != nil {
+		defer reader.Close()
+	}
+	if ctx.Err() == nil && streamCtx.Err() != nil {
+		return nil, context.Cause(streamCtx)
+	}
 	if err != nil {
-		if reader != nil {
-			reader.Close()
-		}
 		return nil, err
 	}
 	if reader == nil {
 		return nil, errors.New("model returned no stream")
 	}
-	defer reader.Close()
+	s := m.execution
+	var publisher DeltaPublisher
+	if s.newDeltaPublisher != nil {
+		publisher = s.newDeltaPublisher(context.WithoutCancel(ctx))
+	}
+	if publisher != nil {
+		defer func() {
+			timer.Stop()
+			cancel(nil)
+			flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(ctx), streamFlushTimeout)
+			defer cancelFlush()
+			publisher.Flush(flushCtx)
+		}()
+	}
+	delta := durable.StreamDelta{RunID: s.run.ID, Epoch: s.run.Epoch, Turn: int64(s.state.Turn)}
+	var reasoningOffset, contentOffset int64
+	publish := func(kind, text string, offset *int64) {
+		if text == "" {
+			return
+		}
+		delta.Kind, delta.Delta, delta.Offset, delta.CreatedAt = kind, text, *offset, time.Now().UTC()
+		publisher.Publish(delta)
+		*offset += int64(len(text))
+	}
 	var chunks []*schema.Message
 	var streamErr error
 	for {
 		chunk, receiveErr := reader.Recv()
+		if ctx.Err() == nil && streamCtx.Err() != nil {
+			return nil, context.Cause(streamCtx)
+		}
 		if chunk != nil {
+			timer.Reset(idleTimeout)
 			chunks = append(chunks, chunk)
+			if publisher != nil {
+				publish(durable.EventModelReasoningDelta, chunk.ReasoningContent, &reasoningOffset)
+				publish(durable.EventModelContentDelta, chunk.Content, &contentOffset)
+			}
 		}
 		if receiveErr != nil {
 			if !errors.Is(receiveErr, io.EOF) {
@@ -87,6 +145,9 @@ func (m *boundaryModel) collectStream(
 	msg, err := schema.ConcatMessages(chunks)
 	if err != nil {
 		return nil, err
+	}
+	if streamErr == nil {
+		adk.EnsureMessageID(msg)
 	}
 	return msg, streamErr
 }
@@ -116,6 +177,11 @@ func (m *boundaryModel) call(
 		msg, callErr := dispatch(ctx, prepared, opts...)
 		generated := msg != nil && (msg.Content != "" || msg.ReasoningContent != "" || len(msg.ToolCalls) > 0)
 		if generated || hasModelUsage(msg) || !isContextOverflowError(callErr) {
+			// Match Eino's bypassed callback wrapper, which drops partial messages
+			// returned alongside an error when the underlying model disables callbacks.
+			if callErr != nil && !components.IsCallbacksEnabled(m.BaseChatModel) {
+				msg = nil
+			}
 			return m.complete(ctx, msg, callErr)
 		}
 		marker := s.state.InflightModel
@@ -193,11 +259,13 @@ func (m *boundaryModel) prepareAttempt(
 	if err := s.store.CheckUsageBudget(ctx, s.run.Lease()); err != nil {
 		return nil, nil, err
 	}
-	s.state.InflightModel = &InflightModel{Kind: "model", Sequence: int64(s.state.Turn)}
+	turn := int64(s.state.Turn)
+	s.state.InflightModel = &InflightModel{Kind: "model", Sequence: turn}
 	if err := s.store.CommitBoundary(ctx, s.run.Lease(), durable.Boundary{
 		Kind:    durable.BoundaryModelStarted,
 		State:   s.encode(),
 		Context: info,
+		Turn:    &turn,
 	}); err != nil {
 		s.state.InflightModel = nil
 		return nil, nil, err
@@ -212,7 +280,7 @@ func (m *boundaryModel) complete(ctx context.Context, msg *schema.Message, callE
 			s.retry = true
 			return nil, callErr
 		}
-		return nil, errors.New("model returned no message")
+		return nil, ErrModelUsageUnavailable
 	}
 	if !hasModelUsage(msg) {
 		return nil, errors.Join(ErrModelUsageUnavailable, callErr)

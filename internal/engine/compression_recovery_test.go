@@ -45,8 +45,8 @@ func TestHTTPContextOverflowRecovery(t *testing.T) {
 					return
 				}
 				requestSizes = append(requestSizes, len(req.Messages))
-				w.Header().Set("Content-Type", "application/json")
 				if len(requestSizes) == 1 || test.persist {
+					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusBadRequest)
 					fmt.Fprint(
 						w,
@@ -54,9 +54,12 @@ func TestHTTPContextOverflowRecovery(t *testing.T) {
 					)
 					return
 				}
-				fmt.Fprint(
+				startModelStream(w)
+				writeModelChunk(w, `{"role":"assistant","content":"recovered"}`)
+				finishModelStream(
 					w,
-					`{"choices":[{"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":4,"total_tokens":24}}`,
+					"stop",
+					`{"prompt_tokens":20,"completion_tokens":4,"total_tokens":24}`,
 				)
 			}))
 			defer server.Close()
@@ -67,7 +70,15 @@ func TestHTTPContextOverflowRecovery(t *testing.T) {
 					{Role: "assistant", Content: strings.Repeat("previous evidence marker ", 1000)},
 				}
 			})
-			worker := &engine.Engine{Store: store, Build: adapters.Build}
+			var publishAttempts int
+			publisher := &capturedDeltas{}
+			worker := &engine.Engine{
+				Store: store, Build: adapters.Build,
+				NewDeltaPublisher: func(context.Context) engine.DeltaPublisher {
+					publishAttempts++
+					return publisher
+				},
+			}
 			if err := worker.Execute(ctx, claimForCompression(t, store)); err != nil {
 				t.Fatal(err)
 			}
@@ -101,6 +112,23 @@ func TestHTTPContextOverflowRecovery(t *testing.T) {
 			if events.counts["ModelOverflowRejected"] != rejections || events.counts["RunBlocked"] != 0 ||
 				len(events.contexts) != 2 || events.contexts[1].ReactiveAttempt != 1 {
 				t.Fatalf("recovery events=%v contexts=%+v", events.counts, events.contexts)
+			}
+			if test.persist {
+				if publishAttempts != 0 || len(publisher.deltas) != 0 {
+					t.Fatalf(
+						"rejected requests opened a publisher: attempts=%d deltas=%+v",
+						publishAttempts,
+						publisher.deltas,
+					)
+				}
+			} else if publishAttempts != 1 || len(publisher.deltas) != 1 ||
+				publisher.deltas[0].Delta != "recovered" || publisher.deltas[0].Offset != 0 ||
+				publisher.deltas[0].Turn != 0 || publisher.deltas[0].Kind != durable.EventModelContentDelta {
+				t.Fatalf(
+					"unexpected recovery deltas: attempts=%d deltas=%+v",
+					publishAttempts,
+					publisher.deltas,
+				)
 			}
 		})
 	}

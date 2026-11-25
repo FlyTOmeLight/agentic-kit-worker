@@ -9,12 +9,14 @@ import (
 
 	"github.com/FlyTOmeLight/server-go/conf"
 	"github.com/FlyTOmeLight/server-go/db"
+	frameworkredis "github.com/FlyTOmeLight/server-go/redis"
 	"github.com/jackc/pgx/v5"
 )
 
 type Config struct {
 	RunMode    string
 	DB         db.Config
+	Redis      frameworkredis.Config
 	Worker     WorkerConfig
 	Evaluator  EvaluatorConfig
 	Pricing    PricingConfig
@@ -66,6 +68,11 @@ func (cfg Config) Validate() error {
 	}
 	if _, err := pgx.ParseConfig(cfg.DB.DSN); err != nil {
 		return errors.New("invalid DB.DSN")
+	}
+	for _, addr := range cfg.Redis.Addrs {
+		if strings.TrimSpace(addr) == "" {
+			return errors.New("Redis.Addrs entries must not be empty")
+		}
 	}
 	if cfg.Worker.Concurrency < 1 {
 		return errors.New("Worker.Concurrency must be positive")

@@ -81,11 +81,26 @@ func (m *fakeModel) Generate(ctx context.Context, in []*schema.Message, _ ...mod
 }
 
 func (m *fakeModel) Stream(
-	context.Context,
-	[]*schema.Message,
-	...model.Option,
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...model.Option,
 ) (*schema.StreamReader[*schema.Message], error) {
-	return nil, errors.New("not used")
+	return modelMessageStream(m.Generate(ctx, input, opts...))
+}
+
+func modelMessageStream(message *schema.Message, err error) (*schema.StreamReader[*schema.Message], error) {
+	if message == nil && err != nil {
+		return nil, err
+	}
+	reader, writer := schema.Pipe[*schema.Message](2)
+	if message != nil {
+		writer.Send(message, nil)
+	}
+	if err != nil {
+		writer.Send(nil, err)
+	}
+	writer.Close()
+	return reader, nil
 }
 
 func (m *fakeModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) { return m, nil }

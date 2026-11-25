@@ -44,8 +44,8 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 	enteredSecondModel := make(chan struct{}, 1)
 	releaseBlocked := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/tool" {
+			w.Header().Set("Content-Type", "application/json")
 			toolCalls.Add(1)
 			if r.Header.Get("Idempotency-Key") == "" {
 				t.Error("tool operation ID missing")
@@ -55,10 +55,7 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 		}
 		n := modelCalls.Add(1)
 		if n == 1 {
-			fmt.Fprint(
-				w,
-				`{"id":"cmpl-1","object":"chat.completion","usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3},"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"remote-tool","type":"function","function":{"name":"submit","arguments":"{}"}}]}}]}`,
-			)
+			writeToolModelStream(t, w, r)
 			return
 		}
 		if n == 2 {
@@ -69,10 +66,10 @@ func TestProcessKillResumesWithoutRepeatingTool(t *testing.T) {
 			}
 			return
 		}
-		fmt.Fprint(
-			w,
-			`{"id":"cmpl-2","object":"chat.completion","usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3},"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"report completed"}}]}`,
-		)
+		checkStreamRequest(t, r)
+		startModelStream(w)
+		writeModelChunk(w, `{"role":"assistant","content":"report completed"}`)
+		finishModelStream(w, "stop", `{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}`)
 	}))
 	defer upstream.Close()
 	defer close(releaseBlocked)
@@ -226,7 +223,7 @@ func buildAPI(t *testing.T) string {
 	return binary
 }
 
-func startAPI(t *testing.T, binary, dsn string) string {
+func startAPI(t *testing.T, binary, dsn string, redisConfig ...string) string {
 	t.Helper()
 	artifactURL := newFakeArtifactServer(t).URL
 	tenantURL := newFakeTenantServer(t).URL
@@ -258,15 +255,17 @@ ConnMaxIdleTime = 300
 [HTTPServer]
 Listen = %q
 ReadTimeout = 10000
-WriteTimeout = -1
+WriteTimeout = 60000
 IdleTimeout = 60000
-[Redis]
-Addrs = ["127.0.0.1:1"]
-DB = 0
 [Tenant]
 Endpoint = %q
 ServiceAPIKey = "process-test-service-key-32chars"
 `, artifactURL, dsn, address, tenantURL)
+	if len(redisConfig) == 0 {
+		text += "\n[Redis]\nAddrs = [\"127.0.0.1:1\"]\nDB = 0\n"
+	} else {
+		text += redisConfig[0]
+	}
 	if err := os.WriteFile(configPath, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +284,6 @@ ServiceAPIKey = "process-test-service-key-32chars"
 		cmd.Env = append(cmd.Env, entry)
 	}
 	cmd.Env = append(cmd.Env, "GIN_MODE=release")
-	// Redis is intentionally unreachable; the HTTP replay contract must remain usable.
 	logPath := filepath.Join(t.TempDir(), "api.log")
 	log, err := os.Create(logPath)
 	if err != nil {
@@ -417,7 +415,7 @@ func buildWorker(t *testing.T) string {
 	return binary
 }
 
-func writeWorkerConfig(t *testing.T, dsn, address string) string {
+func writeWorkerConfig(t *testing.T, dsn, address string, redisConfig ...string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.toml")
 	text := fmt.Sprintf(`AppName = "agentic-kit-worker"
@@ -440,6 +438,9 @@ Concurrency = 1
 Lease = "600ms"
 Poll = "20ms"
 `, address, dsn)
+	if len(redisConfig) > 0 {
+		text += redisConfig[0]
+	}
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -452,9 +453,9 @@ type workerProcess struct {
 	err  error
 }
 
-func startWorker(t *testing.T, binary, dsn, address, logConfig string) *workerProcess {
+func startWorker(t *testing.T, binary, dsn, address, logConfig string, redisConfig ...string) *workerProcess {
 	t.Helper()
-	args := []string{"-config", writeWorkerConfig(t, dsn, address)}
+	args := []string{"-config", writeWorkerConfig(t, dsn, address, redisConfig...)}
 	if logConfig != "" {
 		args = append(args, "-log-config", logConfig)
 	}
@@ -648,11 +649,7 @@ func TestProcessShutdownCancelsInFlightHTTPTool(t *testing.T) {
 			}
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(
-			w,
-			`{"id":"cmpl-1","object":"chat.completion","usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3},"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"remote-tool","type":"function","function":{"name":"submit","arguments":"{}"}}]}}]}`,
-		)
+		writeToolModelStream(t, w, r)
 	}))
 	defer upstream.Close()
 	defer close(releaseTool)

@@ -146,7 +146,21 @@ func Build(
 	return llm, bindings, nil
 }
 
+var streamingModelHTTPClient = func() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 2 * time.Minute
+	return &http.Client{Transport: transport, Timeout: 15 * time.Minute}
+}()
+
 func buildModel(ctx context.Context, spec durable.ModelSpec) (model.ToolCallingChatModel, error) {
+	return newUsageModel(ctx, spec, streamingModelHTTPClient)
+}
+
+func newUsageModel(
+	ctx context.Context,
+	spec durable.ModelSpec,
+	client *http.Client,
+) (model.ToolCallingChatModel, error) {
 	key := os.Getenv(spec.APIKeyEnv)
 	if spec.APIKeyEnv != "" && key == "" {
 		return nil, errors.New("model credential environment variable is not configured")
@@ -155,7 +169,7 @@ func buildModel(ctx context.Context, spec durable.ModelSpec) (model.ToolCallingC
 		BaseURL:     spec.BaseURL,
 		APIKey:      key,
 		Model:       spec.Name,
-		Timeout:     2 * time.Minute,
+		HTTPClient:  client,
 		Temperature: spec.Temperature,
 		TopP:        spec.TopP,
 		MaxTokens:   spec.MaxTokens,

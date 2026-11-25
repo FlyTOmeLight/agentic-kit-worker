@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/contextbuilder"
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	executionpkg "github.com/FlyTOmeLight/agentic-kit-api/pkg/execution"
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -48,6 +50,7 @@ type execution struct {
 	adk.BaseChatModelAgentMiddleware
 	store                    *durable.Store
 	run                      *durable.Run
+	model                    model.BaseChatModel
 	state                    State
 	bindings                 map[string]Binding
 	decision                 *durable.Message
@@ -56,6 +59,8 @@ type execution struct {
 	toolError                error
 	summarizer               Summarizer
 	compactionMaxBytes       int
+	streamIdleTimeout        time.Duration
+	newDeltaPublisher        func(context.Context) DeltaPublisher
 	snapshot                 *contextbuilder.Snapshot
 	lastEstimatedInputTokens int64
 	lastUsedUsageAnchor      bool

@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
@@ -74,9 +73,10 @@ func (m *staticToolModel) Generate(
 }
 
 func (m *staticToolModel) Stream(
-	context.Context,
-	[]*schema.Message,
-	...model.Option,
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...model.Option,
 ) (*schema.StreamReader[*schema.Message], error) {
-	return nil, errors.New("streaming is not used by this test")
+	message, err := m.Generate(ctx, input, opts...)
+	return schema.StreamReaderFromArray([]*schema.Message{message}), err
 }

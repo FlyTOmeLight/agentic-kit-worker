@@ -59,6 +59,15 @@ type Engine struct {
 	Build              Build
 	Summarizer         Summarizer
 	CompactionMaxBytes int
+	StreamIdleTimeout  time.Duration
+	NewDeltaPublisher  func(context.Context) DeltaPublisher
+}
+
+// DeltaPublisher accepts best-effort deltas from a single model stream.
+// Publish must be nonblocking. Flush ends publishing and waits within ctx.
+type DeltaPublisher interface {
+	Publish(durable.StreamDelta)
+	Flush(context.Context)
 }
 
 type operationKey struct{}
@@ -110,6 +119,7 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 	s := &execution{
 		store: e.Store, run: run,
 		summarizer: e.Summarizer, compactionMaxBytes: e.CompactionMaxBytes,
+		streamIdleTimeout: e.StreamIdleTimeout, newDeltaPublisher: e.NewDeltaPublisher,
 	}
 	snapshot, err := decodeSnapshot(run)
 	if err != nil {
@@ -141,6 +151,7 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 	if err != nil {
 		return s.fail(ctx, err)
 	}
+	s.model = llm
 	var tools []tool.BaseTool
 	hasReturnDirectly := false
 	for _, spec := range run.Spec.Tools {

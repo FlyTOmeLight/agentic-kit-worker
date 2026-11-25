@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
@@ -15,6 +17,8 @@ import (
 
 type Summarizer struct{}
 
+var summaryHTTPClient = &http.Client{Timeout: 2 * time.Minute}
+
 func (Summarizer) Summarize(ctx context.Context, input engine.SummaryInput) (string, error) {
 	spec := input.Spec.Model
 	maxTokens := input.MaxOutputTokens
@@ -24,7 +28,7 @@ func (Summarizer) Summarize(ctx context.Context, input engine.SummaryInput) (str
 	if spec.MaxTokens == nil || *spec.MaxTokens > maxTokens {
 		spec.MaxTokens = &maxTokens
 	}
-	llm, err := buildModel(ctx, spec)
+	llm, err := newUsageModel(ctx, spec, summaryHTTPClient)
 	if err != nil {
 		return "", err
 	}

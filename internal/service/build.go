@@ -36,6 +36,13 @@ func Build(ctx context.Context, runtime *app.Runtime, cfg *config.Config) error 
 	if err != nil {
 		return err
 	}
+	if len(cfg.Redis.Addrs) > 0 {
+		liveStream := &liveStreamRedis{config: cfg.Redis, warn: runtime.Log.Warnf}
+		if err := runtime.Initialize(ctx, liveStream); err != nil {
+			return err
+		}
+		executionEngine.NewDeltaPublisher = liveStream.newPublisher
+	}
 	worker := &engine.Worker{
 		Engine:      executionEngine,
 		Log:         runtime.Log,

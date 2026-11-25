@@ -50,11 +50,17 @@ func (base *usageModel) Stream(
 	input []*schema.Message,
 	_ ...model.Option,
 ) (*schema.StreamReader[*schema.Message], error) {
+	stream := base.stream
+	if stream == nil {
+		stream = func() (*schema.StreamReader[*schema.Message], error) {
+			return modelMessageStream(base.generate())
+		}
+	}
 	if base.disableCallbacks {
-		return base.stream()
+		return stream()
 	}
 	ctx = callbacks.OnStart(ctx, &model.CallbackInput{Messages: input})
-	reader, err := base.stream()
+	reader, err := stream()
 	if err != nil {
 		callbacks.OnError(ctx, err)
 		return nil, err

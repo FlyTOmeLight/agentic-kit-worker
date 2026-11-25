@@ -16,6 +16,12 @@ MaxOpenConns = 20
 MaxIdleConns = 5
 ConnMaxIdleTime = 300
 
+# Optional live model deltas. Use the same Redis connection and DB as the API
+# to relay reasoning and content to SSE subscribers.
+# [Redis]
+# Addrs = ["127.0.0.1:6379"]
+# DB = 0
+
 [Worker]
 Concurrency = "${env:WORKER_CONCURRENCY:4}"
 Lease = "${env:WORKER_LEASE:30s}"
