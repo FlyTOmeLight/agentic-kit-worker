@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	readStepResultTool = "read_step_result"
+	readStepResultTool = durable.ReadStepResultToolName
 	defaultReadLimit   = 8192
 	maxReadLimit       = 16384
 )

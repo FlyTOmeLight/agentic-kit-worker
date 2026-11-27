@@ -161,7 +161,7 @@ func Build(
 			}
 		}
 		count := len(bindings)
-		if _, exists := bindings["read_step_result"]; !exists {
+		if _, exists := bindings[durable.ReadStepResultToolName]; !exists {
 			count++
 		}
 		if count > 128 {
@@ -381,24 +381,7 @@ func buildSandboxBackend(
 	if spec.Filesystem == nil {
 		return nil, errors.New("sandbox filesystem binding is required")
 	}
-	tenantID := ""
-	if spec.Scope != nil {
-		tenantID = spec.Scope.TenantID
-	}
-	backend, err := sandboxBackend.New(ctx, store, sandboxBackend.Config{
-		Endpoint:             spec.Filesystem.URL,
-		Token:                os.Getenv(spec.Filesystem.TokenEnv),
-		Workspace:            spec.Filesystem.Workspace,
-		ProfileID:            spec.Filesystem.ProfileID,
-		RequiredSave:         rc.GoalID != "" || spec.Filesystem.RestoreFromSandboxID != "",
-		RestoreFromSandboxID: spec.Filesystem.RestoreFromSandboxID,
-		TenantID:             tenantID,
-		OwnerID:              rc.OwnerID,
-		AcquireKey:           fmt.Sprintf("%s:env:%d", rc.RunID, rc.Epoch),
-		RunID:                rc.RunID,
-		WorkerID:             rc.WorkerID,
-		Epoch:                rc.Epoch,
-	})
+	backend, err := sandboxBackend.New(ctx, store, sandboxEnvironmentConfig(spec, rc))
 	if err != nil {
 		return nil, err
 	}
@@ -408,4 +391,26 @@ func buildSandboxBackend(
 		return nil, errors.Join(err, backend.Close(closeCtx))
 	}
 	return backend, nil
+}
+
+func sandboxEnvironmentConfig(spec durable.Spec, rc engine.RunContext) sandboxBackend.Config {
+	tenantID := ""
+	if spec.Scope != nil {
+		tenantID = spec.Scope.TenantID
+	}
+	return sandboxBackend.Config{
+		Endpoint:  spec.Filesystem.URL,
+		Token:     os.Getenv(spec.Filesystem.TokenEnv),
+		Workspace: spec.Filesystem.Workspace,
+		ProfileID: spec.Filesystem.ProfileID,
+		RequiredSave: (rc.GoalID != "" && rc.ParentRunID == "") ||
+			spec.Filesystem.RestoreFromSandboxID != "",
+		RestoreFromSandboxID: spec.Filesystem.RestoreFromSandboxID,
+		TenantID:             tenantID,
+		OwnerID:              rc.OwnerID,
+		AcquireKey:           fmt.Sprintf("%s:env:%d", rc.RunID, rc.Epoch),
+		RunID:                rc.RunID,
+		WorkerID:             rc.WorkerID,
+		Epoch:                rc.Epoch,
+	}
 }

@@ -24,8 +24,9 @@ import (
 )
 
 const (
-	defaultStreamIdleTimeout = 2 * time.Minute
-	streamFlushTimeout       = 200 * time.Millisecond
+	defaultStreamIdleTimeout             = 2 * time.Minute
+	streamFlushTimeout                   = 200 * time.Millisecond
+	subtaskDelegationUnavailableFeedback = `{"error":{"code":"SUBTASK_DELEGATION_UNAVAILABLE","message":"subtask cannot delegate further subtasks; finish the task directly with available tools"}}`
 )
 
 var errStreamIdleTimeout = errors.New("model stream idle timeout")
@@ -397,16 +398,33 @@ func (m *boundaryModel) applyResponse(ctx context.Context, msg *schema.Message) 
 			if mcpTool && strings.TrimSpace(call.Function.Arguments) == "" {
 				call.Function.Arguments = "{}"
 			}
-			if !json.Valid([]byte(call.Function.Arguments)) {
-				return nil, errors.New("invalid tool arguments")
-			}
-			if _, ok := s.bindings[call.Function.Name]; !ok && !mcpTool {
+			binding, known := s.bindings[call.Function.Name]
+			subtaskDelegateCall := s.hasTools && !known && s.run.ParentRunID != "" &&
+				call.Function.Name == durable.DelegateSubAgentToolName
+			if !known && !mcpTool && !subtaskDelegateCall {
 				return nil, fmt.Errorf("model requested unknown tool: %s", call.Function.Name)
 			}
-			binding := s.bindings[call.Function.Name]
 			inputError := batchError
-			if inputError == nil && binding.EndRun && binding.Validate != nil {
-				inputError = binding.Validate(call.Function.Arguments)
+			switch {
+			case subtaskDelegateCall:
+				if inputError == nil {
+					inputError = errors.New("subtask cannot delegate further subtasks")
+				}
+			case binding.IsDelegate:
+				if !json.Valid([]byte(call.Function.Arguments)) {
+					if inputError == nil {
+						inputError = errors.New("invalid JSON arguments for delegate_subagent")
+					}
+				} else if inputError == nil && binding.Validate != nil {
+					inputError = binding.Validate(call.Function.Arguments)
+				}
+			default:
+				if !json.Valid([]byte(call.Function.Arguments)) {
+					return nil, errors.New("invalid tool arguments")
+				}
+				if inputError == nil && binding.EndRun && binding.Validate != nil {
+					inputError = binding.Validate(call.Function.Arguments)
+				}
 			}
 			if inputError == nil && s.state.ReturnDirectlyStep == "" &&
 				(binding.EndRun || binding.ReturnDirectly) {
@@ -414,7 +432,11 @@ func (m *boundaryModel) applyResponse(ctx context.Context, msg *schema.Message) 
 			}
 			if inputError != nil {
 				call.Function.Name = invalidInputTool
-				call.Function.Arguments = toolInputFeedback(inputError)
+				if subtaskDelegateCall {
+					call.Function.Arguments = subtaskDelegationUnavailableFeedback
+				} else {
+					call.Function.Arguments = toolInputFeedback(inputError)
+				}
 			}
 			decision.ToolCalls = append(
 				decision.ToolCalls,
@@ -485,22 +507,32 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 			)
 		}
 		if input.Name == "ask_for_clarification" {
+			if s.run.ParentRunID != "" {
+				const feedback = `{"error":{"code":"CLARIFICATION_UNAVAILABLE","message":"subtask cannot request user clarification directly; finish with available context or explain what information is missing for the parent agent"}}`
+				return s.finishToolFeedback(ctx, input.CallID, feedback)
+			}
 			return s.pause(ctx, input.CallID, durable.InteractionClarification, input.Arguments)
 		}
 		if binding.Validate != nil {
 			if validationErr := binding.Validate(input.Arguments); validationErr != nil {
-				feedback := toolInputFeedback(validationErr)
-				if err = s.store.FinishStep(
-					ctx,
-					s.run.Lease(),
-					input.CallID,
-					feedback,
-					s.encode(),
-				); err != nil {
-					return nil, err
-				}
-				return &compose.ToolOutput{Result: feedback}, nil
+				return s.finishToolFeedback(ctx, input.CallID, toolInputFeedback(validationErr))
 			}
+		}
+		if binding.IsDelegate {
+			request, err := parseSubAgentRequest(input.Arguments)
+			if err != nil {
+				return s.finishToolFeedback(ctx, input.CallID, toolInputFeedback(err))
+			}
+			request.StepID = input.CallID
+			detail := "awaiting delegated subtask"
+			if request.SubAgent != "" {
+				detail = "awaiting subagent " + request.SubAgent
+			}
+			s.pendingSpawn = &request
+			s.pending = &durable.Boundary{
+				Kind: durable.BoundaryAwaitExternal, Detail: detail, WaitingStep: input.CallID,
+			}
+			return nil, tool.Interrupt(ctx, "save execution boundary")
 		}
 		ctx = context.WithValue(ctx, operationKey{}, s.run.ID+":"+input.CallID)
 		ctx = sandboxAdapter.WithOperationID(ctx, s.run.ID+":"+input.CallID)
@@ -512,17 +544,7 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 			}
 			var correctable interface{ Correctable() bool }
 			if errors.As(err, &correctable) && correctable.Correctable() {
-				feedback := toolInputFeedback(err)
-				if saveErr := s.store.FinishStep(
-					ctx,
-					s.run.Lease(),
-					input.CallID,
-					feedback,
-					s.encode(),
-				); saveErr != nil {
-					return nil, saveErr
-				}
-				return &compose.ToolOutput{Result: feedback}, nil
+				return s.finishToolFeedback(ctx, input.CallID, toolInputFeedback(err))
 			}
 			if binding.Policy == durable.Unsafe {
 				return s.pause(ctx, input.CallID, durable.InteractionReview, err.Error())
@@ -542,6 +564,13 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 		}
 		return output, nil
 	}
+}
+
+func (s *execution) finishToolFeedback(ctx context.Context, stepID, feedback string) (*compose.ToolOutput, error) {
+	if err := s.store.FinishStep(ctx, s.run.Lease(), stepID, feedback, s.encode()); err != nil {
+		return nil, err
+	}
+	return &compose.ToolOutput{Result: feedback}, nil
 }
 
 func (s *execution) recordReturnDirectly(callID, result string) {

@@ -10,7 +10,37 @@ import (
 	"testing"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
+
+	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
+
+func TestSandboxRequiredSaveForChildRun(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		goalID      string
+		parentID    string
+		restoreID   string
+		requireSave bool
+	}{
+		{name: "standalone root"},
+		{name: "Goal root", goalID: "goal", requireSave: true},
+		{name: "Goal child", goalID: "goal", parentID: "parent"},
+		{name: "child with explicit restore", goalID: "goal", parentID: "parent", restoreID: "source", requireSave: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := sandboxEnvironmentConfig(durable.Spec{
+				Filesystem: &durable.FilesystemBinding{RestoreFromSandboxID: test.restoreID},
+			}, engine.RunContext{GoalID: test.goalID, ParentRunID: test.parentID})
+			if config.RequiredSave != test.requireSave || config.RestoreFromSandboxID != test.restoreID {
+				t.Fatalf(
+					"RequiredSave=%t, restore=%q",
+					config.RequiredSave,
+					config.RestoreFromSandboxID,
+				)
+			}
+		})
+	}
+}
 
 func TestHTTPToolContract(t *testing.T) {
 	for _, kind := range []string{"", "HTTP"} {

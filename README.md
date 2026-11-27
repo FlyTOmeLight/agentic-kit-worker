@@ -15,6 +15,8 @@ Worker 在 `boundaryModel` 中用 API 的 `context-v4` 统一构建每次模型�
 
 上下文压缩只改当前请求的消息投影。Eino checkpoint、`durable_step` 和 `agent_message` 保留原始事实。启用工具或工具集的 Run 可调用只读工具 `read_step_result`，通过本 Run 的步骤 ID 和字节偏移读取完整工具结果，按 UTF-8 边界分页。Run 成功后摘要和保留边界才提升到 Session，后续 Run 冻结该摘要及保留的消息。
 
+配置 `SubAgents` 或 `SelfDelegate` 的主 Run 可通过 `delegate_subagent` 委派任务。各子 Run 使用冻结的模型和提示词，在独立会话中执行。Worker 在同一事务中创建子 Run、保存父 checkpoint 并挂起父 Run。子 Run 成功、失败或取消后，父 Run 从等待的工具步骤恢复。同轮多个委派按顺序执行。子 Run 不提供内置委派工具，调用用户澄清工具时会收到反馈并继续执行。
+
 入口位于 `cmd/worker`，server-go 生命周期与资源装配位于 `internal/service`，执行器位于 `internal/engine`，模型与工具适配位于 `internal/adapters`。数据库访问统一由 API 的 `pkg/durable` 使用 GORM 管理，worker 复用其中的事务和状态操作；[目录与依赖说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/layout.md)。
 
 ## Agent 架构与执行规则

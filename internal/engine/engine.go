@@ -22,6 +22,7 @@ import (
 type Binding struct {
 	EndRun         bool
 	ReturnDirectly bool
+	IsDelegate     bool
 	Validate       func(string) error
 	Tool           tool.InvokableTool
 	Policy         durable.Policy
@@ -35,12 +36,13 @@ type Build func(context.Context, *durable.Store, durable.Spec) (model.ToolCallin
 // RunContext is the caller's claim on the run, handed to Build so an
 // environment backend can bind its lifecycle to the same lease.
 type RunContext struct {
-	RunID    string
-	WorkerID string
-	Epoch    int64
-	OwnerID  string
-	TenantID string
-	GoalID   string
+	RunID       string
+	WorkerID    string
+	Epoch       int64
+	OwnerID     string
+	TenantID    string
+	GoalID      string
+	ParentRunID string
 }
 
 type runContextKey struct{}
@@ -112,12 +114,13 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 		tenantID = run.Scope.TenantID
 	}
 	ctx = WithRunContext(ctx, RunContext{
-		RunID:    run.ID,
-		WorkerID: run.WorkerID,
-		Epoch:    run.Epoch,
-		OwnerID:  run.OwnerID,
-		TenantID: tenantID,
-		GoalID:   run.GoalID,
+		RunID:       run.ID,
+		WorkerID:    run.WorkerID,
+		Epoch:       run.Epoch,
+		OwnerID:     run.OwnerID,
+		TenantID:    tenantID,
+		GoalID:      run.GoalID,
+		ParentRunID: run.ParentRunID,
 	})
 	s := &execution{
 		store: e.Store, run: run,
@@ -199,6 +202,15 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 	if bindings == nil {
 		bindings = make(map[string]Binding)
 	}
+	if _, exists := bindings[durable.DelegateSubAgentToolName]; !exists && canDelegate(run) {
+		binding, err := delegateSubAgentBinding(s)
+		if err != nil {
+			return s.fail(ctx, err)
+		}
+		bindings[durable.DelegateSubAgentToolName] = binding
+		tools = append(tools, binding.Tool)
+		dynamicTools = true
+	}
 	if _, exists := bindings[readStepResultTool]; !exists &&
 		(len(run.Spec.Tools) > 0 || dynamicTools) {
 		binding, err := readStepResultBinding(s)
@@ -208,8 +220,12 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 		bindings[readStepResultTool] = binding
 		tools = append(tools, binding.Tool)
 	}
+	if dynamicTools && len(tools) > 128 {
+		return s.fail(ctx, fmt.Errorf("tool count %d exceeds limit of 128", len(tools)))
+	}
 	bindings[invalidInputTool] = Binding{Policy: durable.ReadOnly}
 	s.bindings = bindings
+	s.hasTools = len(tools) > 0
 	maxIterations := run.Spec.MaxTurns
 	if hasReturnDirectly {
 		// A successful terminal tool uses one internal synthetic response, without
@@ -304,9 +320,6 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 			break
 		}
 		if s.pending != nil {
-			// A later clarification or review owns the next model turn; clear any
-			// provisional direct-tool result so it cannot bypass the human answer.
-			s.state.Final = nil
 			return nil
 		} // Set atomically saved pause and checkpoint.
 		if interrupted {

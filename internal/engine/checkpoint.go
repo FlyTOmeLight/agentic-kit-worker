@@ -54,8 +54,10 @@ type execution struct {
 	model                    model.BaseChatModel
 	state                    State
 	bindings                 map[string]Binding
+	hasTools                 bool
 	decision                 *durable.Message
 	pending                  *durable.Boundary
+	pendingSpawn             *durable.ChildSpawnRequest
 	retry                    bool
 	toolError                error
 	summarizer               Summarizer
@@ -121,9 +123,11 @@ func (s *execution) Set(ctx context.Context, id string, checkpoint []byte) error
 	if s.pending == nil {
 		return errors.New("unexpected Eino checkpoint without a decision or pause")
 	}
-	// A later clarification or review owns the next model turn; clear any
-	// provisional direct-tool result so it cannot bypass the human answer.
 	s.state.Final = nil
+	if s.pendingSpawn != nil {
+		_, err := s.store.SpawnChildAndAwait(ctx, s.run.Lease(), *s.pendingSpawn, s.encode(), s.pending.Detail)
+		return err
+	}
 	pause := *s.pending
 	pause.State = s.encode()
 	return s.store.CommitBoundary(ctx, s.run.Lease(), pause)
