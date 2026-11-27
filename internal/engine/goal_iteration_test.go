@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -147,7 +148,8 @@ func TestWorkerGoalIteration(t *testing.T) {
 			for index := range test.verdicts {
 				spec := <-builds
 				messages := <-inputs
-				if spec.ConfigVersion != first.Spec.ConfigVersion || spec.Model != first.Spec.Model {
+				if spec.ConfigVersion != first.Spec.ConfigVersion ||
+					!reflect.DeepEqual(spec.Model, first.Spec.Model) {
 					t.Fatalf("iteration lost the frozen configuration: %+v", spec)
 				}
 				if index == 0 {

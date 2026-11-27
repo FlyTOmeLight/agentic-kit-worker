@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/agent"
+	"github.com/FlyTOmeLight/agentic-kit-api/pkg/contextbuilder"
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
+	executionpkg "github.com/FlyTOmeLight/agentic-kit-api/pkg/execution"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
@@ -556,14 +559,74 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 		// After a crash, BeginStep supplies this committed result to Eino without
 		// invoking the external tool again, even if the checkpoint precedes the batch.
 		previousFinal := s.state.Final
+		previousFiles := s.state.ArtifactFiles
 		s.recordReturnDirectly(input.CallID, output.Result)
-		if err = s.store.FinishStep(ctx, s.run.Lease(), input.CallID, output.Result, s.encode()); err != nil {
+		var artifacts []durable.FileArtifact
+		if binding.FileAction != "" && !toolHasError(output.Result) {
+			artifacts = fileArtifacts(s.run.Spec.Filesystem, binding.FileAction, input.Arguments)
+			if len(artifacts) > 0 {
+				s.state.ArtifactFiles = indexArtifact(previousFiles, artifacts[0])
+			}
+		}
+		if err = s.store.FinishStepWithArtifacts(
+			ctx, s.run.Lease(), input.CallID, output.Result, artifacts, s.encode(),
+		); err != nil {
 			s.state.Final = previousFinal
+			s.state.ArtifactFiles = previousFiles
 			s.toolError = err
 			return nil, err
 		}
 		return output, nil
 	}
+}
+
+func fileArtifacts(
+	filesystem *durable.FilesystemBinding, action, arguments string,
+) []durable.FileArtifact {
+	var input struct {
+		Path string `json:"file_path"`
+	}
+	if filesystem == nil || json.Unmarshal([]byte(arguments), &input) != nil || input.Path == "" {
+		return nil
+	}
+	workspace := path.Clean(filesystem.Workspace)
+	if !path.IsAbs(workspace) {
+		return nil
+	}
+	cleanPath := path.Clean(input.Path)
+	if !path.IsAbs(cleanPath) {
+		cleanPath = path.Join(workspace, cleanPath)
+	}
+	if cleanPath != workspace && !strings.HasPrefix(cleanPath, strings.TrimSuffix(workspace, "/")+"/") {
+		return nil
+	}
+	artifacts := []durable.FileArtifact{
+		{Path: cleanPath, Name: path.Base(cleanPath), Action: action, Provider: filesystem.Provider},
+	}
+	if executionpkg.ValidateFileArtifacts(artifacts) != nil {
+		// Preserve the completed tool result even when its path cannot be indexed.
+		return nil
+	}
+	return artifacts
+}
+
+func indexArtifact(
+	previous []contextbuilder.FileIndexEntry,
+	artifact durable.FileArtifact,
+) []contextbuilder.FileIndexEntry {
+	files := make([]contextbuilder.FileIndexEntry, 1, min(len(previous)+1, contextbuilder.MaxFileIndexEntries))
+	files[0] = contextbuilder.FileIndexEntry{
+		URI: artifact.Path, Name: artifact.Name, Source: "workspace", Action: artifact.Action, Accessible: true,
+	}
+	for _, file := range previous {
+		if len(files) == contextbuilder.MaxFileIndexEntries {
+			break
+		}
+		if file.URI != artifact.Path {
+			files = append(files, file)
+		}
+	}
+	return files
 }
 
 func (s *execution) finishToolFeedback(ctx context.Context, stepID, feedback string) (*compose.ToolOutput, error) {

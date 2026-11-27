@@ -49,6 +49,12 @@ func (s *execution) compactContext(
 					Content:    m.Content,
 					ToolCallID: m.ToolCallID,
 				}
+				if len(m.Attachments) > 0 {
+					if msg.Content != "" {
+						msg.Content += "\n\n"
+					}
+					msg.Content += contextbuilder.AttachmentSummaryText(m.Attachments)
+				}
 				for _, call := range m.ToolCalls {
 					msg.ToolCalls = append(
 						msg.ToolCalls,
@@ -76,6 +82,11 @@ func (s *execution) compactContext(
 		}
 		if row.Kind != "User" {
 			head = append(head, row.Message)
+		} else if len(row.Attachments) > 0 {
+			head = append(head, durable.Message{
+				Role:    row.Role,
+				Content: contextbuilder.AttachmentSummaryText(contextAttachments(row.Attachments)),
+			})
 		}
 	}
 	if len(head) == 0 && (summary == "" || projection.Summary != "") {

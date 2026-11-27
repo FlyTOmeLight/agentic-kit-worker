@@ -133,15 +133,21 @@ func Build(
 			if _, exists := bindings[info.Name]; exists {
 				return nil, nil, fmt.Errorf("duplicate filesystem tool: %s", info.Name)
 			}
-			policy := durable.ReadOnly
-			if info.Name == "write_file" || info.Name == "edit_file" || info.Name == "execute" {
-				policy = durable.Unsafe
+			binding := engine.Binding{Policy: durable.ReadOnly}
+			switch info.Name {
+			case fsTools.ToolNameWriteFile:
+				binding.Policy, binding.FileAction = durable.Unsafe, "written"
+			case fsTools.ToolNameEditFile:
+				binding.Policy, binding.FileAction = durable.Unsafe, "edited"
+			case fsTools.ToolNameExecute:
+				binding.Policy = durable.Unsafe
 			}
 			invokable := base.(tool.InvokableTool)
 			if environment != nil {
 				invokable = &sandboxTool{InvokableTool: invokable, Backend: environment}
 			}
-			bindings[info.Name] = engine.Binding{Tool: invokable, Policy: policy}
+			binding.Tool = invokable
+			bindings[info.Name] = binding
 		}
 	}
 	if len(spec.MCPServers) > 0 {

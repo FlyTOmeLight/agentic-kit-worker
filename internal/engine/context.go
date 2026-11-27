@@ -52,9 +52,10 @@ func fillLegacyHistory(snapshot *contextbuilder.Snapshot, history []durable.Mess
 	}
 	for _, msg := range history {
 		m := contextbuilder.Message{
-			Role:       contextbuilder.Role(msg.Role),
-			Content:    msg.Content,
-			ToolCallID: msg.ToolCallID,
+			Role:        contextbuilder.Role(msg.Role),
+			Content:     msg.Content,
+			ToolCallID:  msg.ToolCallID,
+			Attachments: contextAttachments(msg.Attachments),
 		}
 		for _, call := range msg.ToolCalls {
 			m.ToolCalls = append(
@@ -98,11 +99,38 @@ func (s *execution) modelSnapshot() *contextbuilder.Snapshot {
 		budget.MaxToolResultBytes = max(128, min(budget.MaxToolResultBytes, budget.InputTokenLimit()/2))
 	}
 	snapshot := &contextbuilder.Snapshot{
-		Materials: contextbuilder.FrozenMaterials{SystemInstruction: spec.SystemPrompt},
-		Policy:    contextbuilder.Policy{Version: contextbuilder.PolicyVersionV4}, Budget: budget,
+		Materials: contextbuilder.FrozenMaterials{
+			SystemInstruction: spec.SystemPrompt,
+			FileIndex:         appendAttachmentFiles(nil, spec.Attachments),
+		},
+		Policy: contextbuilder.Policy{Version: contextbuilder.PolicyVersionV4}, Budget: budget,
 	}
 	fillLegacyHistory(snapshot, spec.History)
 	return snapshot
+}
+
+func contextAttachments(attachments []durable.Attachment) []contextbuilder.Attachment {
+	var out []contextbuilder.Attachment
+	for _, att := range attachments {
+		out = append(out, contextbuilder.Attachment{
+			ID: att.ID, Kind: string(att.Kind), URI: att.URI, Name: att.Name, MediaType: att.MediaType,
+			SizeBytes: att.SizeBytes, ArtifactURI: att.ArtifactURI,
+		})
+	}
+	return out
+}
+
+func appendAttachmentFiles(
+	files []contextbuilder.FileIndexEntry,
+	attachments []durable.Attachment,
+) []contextbuilder.FileIndexEntry {
+	for _, att := range attachments {
+		files = append(files, contextbuilder.FileIndexEntry{
+			URI: att.URI, Name: att.Name, MediaType: att.MediaType, SizeBytes: att.SizeBytes,
+			Source: "attachment", Action: "uploaded",
+		})
+	}
+	return files
 }
 
 func toContextMessage(m *schema.Message) (contextbuilder.Message, error) {
@@ -140,7 +168,9 @@ func toSchemaMessage(m contextbuilder.Message) *schema.Message {
 	case contextbuilder.RoleSystem:
 		return schema.SystemMessage(m.Content)
 	case contextbuilder.RoleUser:
-		return schema.UserMessage(m.Content)
+		msg := &schema.Message{Role: schema.User}
+		setProjectedContent(msg, m)
+		return msg
 	case contextbuilder.RoleAssistant:
 		var calls []schema.ToolCall
 		for _, call := range m.ToolCalls {
@@ -170,6 +200,36 @@ func toSchemaMessage(m contextbuilder.Message) *schema.Message {
 			Content: m.Content,
 		}
 	}
+}
+
+func setProjectedContent(msg *schema.Message, projected contextbuilder.Message) {
+	msg.Content = projected.Content
+	msg.UserInputMultiContent = nil
+	if len(projected.Attachments) == 0 {
+		return
+	}
+
+	// OpenAI represents content as either a string or an array of parts.
+	msg.Content = ""
+	parts := make([]schema.MessageInputPart, 0, 1+len(projected.Attachments))
+	parts = append(parts, schema.MessageInputPart{Type: schema.ChatMessagePartTypeText, Text: projected.Content})
+	for _, att := range projected.Attachments {
+		uri := att.URI
+		common := schema.MessagePartCommon{URL: &uri}
+		switch att.Kind {
+		case "image":
+			parts = append(parts, schema.MessageInputPart{
+				Type:  schema.ChatMessagePartTypeImageURL,
+				Image: &schema.MessageInputImage{MessagePartCommon: common},
+			})
+		case "video":
+			parts = append(parts, schema.MessageInputPart{
+				Type:  schema.ChatMessagePartTypeVideoURL,
+				Video: &schema.MessageInputVideo{MessagePartCommon: common},
+			})
+		}
+	}
+	msg.UserInputMultiContent = parts
 }
 
 // projectedTurn keeps the original Eino messages available for metadata and
@@ -210,6 +270,7 @@ func projectTurn(
 	original []*schema.Message,
 	query string,
 	projection durable.ContextProjection,
+	attachments []contextbuilder.Attachment,
 ) (projectedTurn, error) {
 	out := projectedTurn{
 		originals: make(map[string]*schema.Message),
@@ -243,6 +304,9 @@ func projectTurn(
 			case message.Role == contextbuilder.RoleTool && !keptResults[message.ToolCallID]:
 				continue
 			}
+		}
+		if i == 0 && source.Role == schema.User && projection.FirstKeptSeq == 0 {
+			message.Attachments = attachments
 		}
 		for _, call := range message.ToolCalls {
 			names[call.ID] = call.Name
@@ -281,7 +345,7 @@ func (turn projectedTurn) render(messages []contextbuilder.Message) []*schema.Me
 		}
 		if source := turn.originals[key]; source != nil {
 			copy := *source
-			copy.Content = message.Content
+			setProjectedContent(&copy, message)
 			if len(message.ToolCalls) > 0 {
 				copy.ToolCalls = append([]schema.ToolCall(nil), source.ToolCalls...)
 				for i, call := range message.ToolCalls {
@@ -328,7 +392,7 @@ func (s *execution) prepareModelInput(
 	}
 	in := contextbuilder.BuildInput{
 		FrozenMaterials: snapshot.Materials, Policy: snapshot.Policy, Budget: budget, Counter: counter,
-		Steers: s.state.Steers,
+		DirectModalities: s.run.Spec.Model.InputModalities, Steers: s.state.Steers,
 	}
 	in.FrozenMaterials.Tools = make([]contextbuilder.ToolDefinition, 0, len(tools))
 	for _, tool := range tools {
@@ -350,9 +414,20 @@ func (s *execution) prepareModelInput(
 
 	original := s.currentRunMessages(stateMessages)
 	query := s.run.Spec.Query
+	attachments := contextAttachments(s.run.Spec.Attachments)
 	prepareTurn := func() (projectedTurn, error) {
-		turn, err := projectTurn(original, query, projection)
+		turn, err := projectTurn(original, query, projection, attachments)
+		if err != nil {
+			return turn, err
+		}
 		in.CurrentTurn = turn.messages
+		in.FileIndex = s.state.ArtifactFiles
+		// Build indexes attachments on the original first message. When that
+		// message is gone, retain its files without passing media to the model.
+		if s.snapshot != nil && len(attachments) > 0 && len(turn.messages[0].Attachments) == 0 {
+			files := append([]contextbuilder.FileIndexEntry(nil), in.FileIndex...)
+			in.FileIndex = appendAttachmentFiles(files, s.run.Spec.Attachments)
+		}
 		in.CompactedSummary = projection.Summary
 		in.PinnedBlocks = nil
 		if projection.FirstKeptSeq > 0 && len(turn.messages) > 0 &&
@@ -367,7 +442,7 @@ func (s *execution) prepareModelInput(
 				in.PinnedBlocks = append(in.PinnedBlocks, pin.Block)
 			}
 		}
-		return turn, err
+		return turn, nil
 	}
 	turn, err := prepareTurn()
 	if err != nil {

@@ -26,6 +26,7 @@ type Binding struct {
 	Validate       func(string) error
 	Tool           tool.InvokableTool
 	Policy         durable.Policy
+	FileAction     string
 }
 
 // Build resolves only the immutable configuration accepted for this run. The

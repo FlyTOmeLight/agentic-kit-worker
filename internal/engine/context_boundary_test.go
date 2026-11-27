@@ -271,3 +271,40 @@ func TestFillLegacyHistorySplitsTurnsAfterToolBatch(t *testing.T) {
 		t.Fatalf("multi-tool turn split unexpectedly: %+v", multiSnapshot.Materials.History)
 	}
 }
+
+func TestLegacyRunProjectsAttachmentsWithoutMutatingCheckpointMessages(t *testing.T) {
+	const uri = "https://assets.example/original.png"
+	original := schema.UserMessage("inspect file")
+	s := &execution{
+		run: &durable.Run{Spec: durable.Spec{
+			Query: original.Content,
+			Attachments: []durable.Attachment{
+				{Kind: "image", URI: uri, Name: "original.png", MediaType: "image/png"},
+			},
+		}},
+	}
+	if files := s.modelSnapshot().Materials.FileIndex; len(files) != 1 || files[0].URI != uri {
+		t.Fatalf("legacy snapshot file index: %+v", files)
+	}
+	withImage, _, _, err := s.prepareModelInput(t.Context(), []*schema.Message{original}, nil, 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withImage) != 2 || strings.Count(withImage[0].Content, uri) != 1 {
+		t.Fatalf("expected one indexed attachment: %+v", withImage)
+	}
+	request := withImage[1]
+	if request == original || request.Content != "" || len(request.UserInputMultiContent) != 2 ||
+		request.UserInputMultiContent[0].Text != original.Content || original.Content != "inspect file" ||
+		original.UserInputMultiContent != nil {
+		t.Fatalf("unexpected outbound or checkpoint message: outbound=%+v original=%+v", request, original)
+	}
+	synthetic, _, _, err := s.prepareModelInput(t.Context(), nil, nil, 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(synthetic) != 2 || strings.Count(synthetic[0].Content, uri) != 1 ||
+		synthetic[1].Content != original.Content || synthetic[1].UserInputMultiContent != nil {
+		t.Fatalf("synthetic query should be text with a separate file index: %+v", synthetic)
+	}
+}

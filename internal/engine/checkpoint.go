@@ -31,6 +31,8 @@ type UsageAnchor struct {
 }
 
 type State struct {
+	ArtifactFiles []contextbuilder.FileIndexEntry `json:"artifactFiles,omitempty"`
+
 	UsageAnchor                *UsageAnchor    `json:"usageAnchor,omitempty"`
 	SummaryConsecutiveFailures int             `json:"summaryConsecutiveFailures,omitempty"`
 	CompactedInteractionPins   []compactedPin  `json:"compactedInteractionPins,omitempty"`
