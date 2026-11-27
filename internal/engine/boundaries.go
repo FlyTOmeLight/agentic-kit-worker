@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/FlyTOmeLight/agentic-kit-api/pkg/agent"
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/callbacks"
@@ -389,10 +392,15 @@ func (m *boundaryModel) applyResponse(ctx context.Context, msg *schema.Message) 
 		for i := range msg.ToolCalls {
 			call := &msg.ToolCalls[i]
 			call.ID = fmt.Sprintf("turn_%d_tool_%d", s.state.Turn, i)
+			mcpTool := len(s.run.Spec.MCPServers) > 0 &&
+				strings.HasPrefix(call.Function.Name, agent.MCPToolPrefix)
+			if mcpTool && strings.TrimSpace(call.Function.Arguments) == "" {
+				call.Function.Arguments = "{}"
+			}
 			if !json.Valid([]byte(call.Function.Arguments)) {
 				return nil, errors.New("invalid tool arguments")
 			}
-			if _, ok := s.bindings[call.Function.Name]; !ok {
+			if _, ok := s.bindings[call.Function.Name]; !ok && !mcpTool {
 				return nil, fmt.Errorf("model requested unknown tool: %s", call.Function.Name)
 			}
 			binding := s.bindings[call.Function.Name]
@@ -434,11 +442,26 @@ func (s *execution) wrapTool(next compose.InvokableToolEndpoint) compose.Invokab
 			return nil, s.toolError
 		}
 		binding := s.bindings[input.Name]
-		decision, err := s.store.BeginStep(ctx, s.run.Lease(), durable.StepIntent{
+		intent := durable.StepIntent{
 			ID:     input.CallID,
 			Input:  input.Name + "\x00" + input.Arguments,
 			Policy: binding.Policy,
-		})
+		}
+		decision, err := s.store.BeginStep(ctx, s.run.Lease(), intent)
+		if errors.Is(err, durable.ErrConflict) && binding.Tool == nil &&
+			strings.HasPrefix(input.Name, agent.MCPToolPrefix) {
+			serverName, remoteName, found := strings.Cut(
+				strings.TrimPrefix(input.Name, agent.MCPToolPrefix),
+				"__",
+			)
+			for _, server := range s.run.Spec.MCPServers {
+				if found && server.Name == serverName && server.PolicyFor(remoteName) != intent.Policy {
+					intent.Policy = server.PolicyFor(remoteName)
+					decision, err = s.store.BeginStep(ctx, s.run.Lease(), intent)
+					break
+				}
+			}
+		}
 		if err != nil {
 			s.toolError = err
 			return nil, err
@@ -565,6 +588,20 @@ type environmentBackend interface {
 	Released() bool
 	Detach()
 	Close(context.Context) error
+}
+
+type sessionCloser interface {
+	CloseSession(context.Context) error
+}
+
+func finishSessions(ctx context.Context, bindings map[string]Binding) {
+	var closing sync.WaitGroup
+	for _, binding := range bindings {
+		if session, ok := binding.Tool.(sessionCloser); ok {
+			closing.Go(func() { _ = session.CloseSession(ctx) })
+		}
+	}
+	closing.Wait()
 }
 
 func finishEnvironments(ctx context.Context, bindings map[string]Binding, release bool) {

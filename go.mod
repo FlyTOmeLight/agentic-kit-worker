@@ -3,7 +3,7 @@ module github.com/FlyTOmeLight/agentic-kit-worker
 go 1.27.1
 
 require (
-	github.com/FlyTOmeLight/agentic-kit-api v0.7.1
+	github.com/FlyTOmeLight/agentic-kit-api v0.8.0
 	github.com/FlyTOmeLight/server-go v0.17.1
 	github.com/agent-infra/sandbox-sdk-go v0.0.5
 	github.com/cloudwego/eino v0.9.2
@@ -12,8 +12,10 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/meguminnnnnnnnn/go-openai v0.1.2
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
+	golang.org/x/sync v0.24.0
 	gorm.io/driver/postgres v1.6.3
 	gorm.io/gorm v1.31.2
 )
@@ -64,6 +66,7 @@ require (
 	github.com/goburrow/serial v0.1.0 // indirect
 	github.com/goccy/go-json v0.11.2 // indirect
 	github.com/goccy/go-yaml v1.19.2 // indirect
+	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
 	github.com/hashicorp/go-version v1.9.0 // indirect
@@ -96,6 +99,7 @@ require (
 	github.com/rogpeppe/go-internal v1.16.0 // indirect
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
+	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/shopspring/decimal v1.5.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/slongfield/pyfmt v0.0.0-20220222012616-ea85ff4c361f // indirect
@@ -113,6 +117,7 @@ require (
 	github.com/ugorji/go/codec v1.3.2 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/yargevad/filepathx v1.0.0 // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.9.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.47.0 // indirect
@@ -128,7 +133,7 @@ require (
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1 // indirect
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/net v0.61.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect

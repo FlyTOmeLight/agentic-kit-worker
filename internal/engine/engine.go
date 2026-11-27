@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/FlyTOmeLight/agentic-kit-api/pkg/agent"
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -99,6 +101,7 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 	defer func() {
 		release := beforeRelease == nil
 		defer func() { finishEnvironments(context.WithoutCancel(ctx), bindings, release) }()
+		defer func() { finishSessions(context.WithoutCancel(ctx), bindings) }()
 		if beforeRelease != nil {
 			release = beforeRelease()
 		}
@@ -149,6 +152,16 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 	}
 	llm, bindings, err := e.Build(ctx, e.Store, run.Spec)
 	if err != nil {
+		var retryable interface{ Retryable() bool }
+		if errors.As(err, &retryable) && retryable.Retryable() {
+			return e.Store.Retry(
+				ctx,
+				run.Lease(),
+				s.encode(),
+				err.Error(),
+				time.Second*time.Duration(run.Attempt),
+			)
+		}
 		return s.fail(ctx, err)
 	}
 	s.model = llm
@@ -166,7 +179,8 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 			hasReturnDirectly = true
 		}
 	}
-	if len(run.Spec.Toolsets) > 0 {
+	dynamicTools := len(run.Spec.Toolsets) > 0 || len(run.Spec.MCPServers) > 0
+	if dynamicTools {
 		configured := map[string]bool{}
 		for _, t := range run.Spec.Tools {
 			configured[t.Name] = true
@@ -186,7 +200,7 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 		bindings = make(map[string]Binding)
 	}
 	if _, exists := bindings[readStepResultTool]; !exists &&
-		(len(run.Spec.Tools) > 0 || len(run.Spec.Toolsets) > 0) {
+		(len(run.Spec.Tools) > 0 || dynamicTools) {
 		binding, err := readStepResultBinding(s)
 		if err != nil {
 			return s.fail(ctx, err)
@@ -202,7 +216,7 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 		// spending another user-configured model turn.
 		maxIterations++
 	}
-	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+	chatAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:          "agent",
 		Instruction:   run.Spec.SystemPrompt,
 		Model:         llm,
@@ -214,12 +228,23 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
 			Tools: tools, ExecuteSequentially: true,
 			UnknownToolsHandler: func(ctx context.Context, name, args string) (string, error) {
-				if name != invalidInputTool {
+				feedback := args
+				switch {
+				case name == invalidInputTool:
+				case strings.HasPrefix(name, agent.MCPToolPrefix):
+					bindings[name] = Binding{Policy: durable.ReadOnly}
+					message, _ := json.Marshal(
+						fmt.Sprintf("MCP tool %q is no longer available", name),
+					)
+					feedback = `{"error":{"code":"TOOL_UNAVAILABLE","message":` + string(
+						message,
+					) + `}}`
+				default:
 					return "", fmt.Errorf("unknown tool: %s", name)
 				}
 				out, err := s.wrapTool(
-					func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-						return &compose.ToolOutput{Result: input.Arguments}, nil
+					func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+						return &compose.ToolOutput{Result: feedback}, nil
 					},
 				)(
 					ctx,
@@ -241,7 +266,7 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 	if err != nil {
 		return s.fail(ctx, err)
 	}
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, CheckPointStore: s})
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: chatAgent, CheckPointStore: s})
 	var iter *adk.AsyncIterator[*adk.AgentEvent]
 	if len(s.state.Checkpoint) > 0 {
 		iter, err = runner.Resume(ctx, run.ID)

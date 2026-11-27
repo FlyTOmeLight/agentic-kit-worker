@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/FlyTOmeLight/agentic-kit-api/pkg/durable"
@@ -35,12 +36,23 @@ func Build(
 	spec durable.Spec,
 ) (llm model.ToolCallingChatModel, bindings map[string]engine.Binding, err error) {
 	var environment *sandboxBackend.Backend
+	var discovered []mcpDiscovery
 	defer func() {
-		if err != nil && environment != nil {
+		if err == nil {
+			return
+		}
+		var closing sync.WaitGroup
+		for _, server := range discovered {
+			if server.session != nil {
+				closing.Go(func() { _ = server.session.CloseSession(context.WithoutCancel(ctx)) })
+			}
+		}
+		if environment != nil {
 			closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			err = errors.Join(err, environment.Close(closeCtx))
 		}
+		closing.Wait()
 	}()
 	llm, err = buildModel(ctx, spec.Model)
 	if err != nil {
@@ -132,7 +144,34 @@ func Build(
 			bindings[info.Name] = engine.Binding{Tool: invokable, Policy: policy}
 		}
 	}
+	if len(spec.MCPServers) > 0 {
+		discovered, err = discoverMCPServers(ctx, spec)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, server := range discovered {
+			if len(server.bindings) == 0 {
+				_ = server.session.CloseSession(context.WithoutCancel(ctx))
+			}
+			for name, binding := range server.bindings {
+				if _, exists := bindings[name]; exists {
+					return nil, nil, fmt.Errorf("duplicate MCP tool: %s", name)
+				}
+				bindings[name] = binding
+			}
+		}
+		count := len(bindings)
+		if _, exists := bindings["read_step_result"]; !exists {
+			count++
+		}
+		if count > 128 {
+			return nil, nil, fmt.Errorf("tool count %d exceeds limit of 128", count)
+		}
+	}
 	for name, binding := range bindings {
+		if binding.Validate != nil {
+			continue
+		}
 		info, err := binding.Tool.Info(ctx)
 		if err != nil {
 			return nil, nil, err
