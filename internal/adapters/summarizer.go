@@ -15,11 +15,13 @@ import (
 	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
-type Summarizer struct{}
+type Summarizer struct {
+	Credentials CredentialPolicy
+}
 
 var summaryHTTPClient = &http.Client{Timeout: 2 * time.Minute}
 
-func (Summarizer) Summarize(ctx context.Context, input engine.SummaryInput) (string, error) {
+func (s Summarizer) Summarize(ctx context.Context, input engine.SummaryInput) (string, error) {
 	spec := input.Spec.Model
 	maxTokens := input.MaxOutputTokens
 	if maxTokens <= 0 {
@@ -28,7 +30,11 @@ func (Summarizer) Summarize(ctx context.Context, input engine.SummaryInput) (str
 	if spec.MaxTokens == nil || *spec.MaxTokens > maxTokens {
 		spec.MaxTokens = &maxTokens
 	}
-	llm, err := newUsageModel(ctx, spec, summaryHTTPClient)
+	credentials := s.Credentials
+	if input.Spec.Filesystem != nil {
+		credentials = credentials.WithDenied(input.Spec.Filesystem.TokenEnv)
+	}
+	llm, err := newUsageModel(ctx, spec, summaryHTTPClient, credentials)
 	if err != nil {
 		return "", err
 	}

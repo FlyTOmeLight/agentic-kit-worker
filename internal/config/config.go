@@ -14,14 +14,20 @@ import (
 )
 
 type Config struct {
-	RunMode    string
-	DB         db.Config
-	Redis      frameworkredis.Config
-	Worker     WorkerConfig
-	Evaluator  EvaluatorConfig
-	Pricing    PricingConfig
-	Compaction CompactionConfig
-	HTTPServer conf.HTTPServerConfig
+	RunMode     string
+	DB          db.Config
+	Redis       frameworkredis.Config
+	Worker      WorkerConfig
+	Credentials CredentialsConfig
+	Evaluator   EvaluatorConfig
+	Pricing     PricingConfig
+	Compaction  CompactionConfig
+	HTTPServer  conf.HTTPServerConfig
+}
+
+type CredentialsConfig struct {
+	AllowedEnvPrefixes []string
+	AllowedEnvVars     []string
 }
 
 type PricingConfig map[string]any
@@ -40,10 +46,11 @@ type CompactionConfig struct {
 }
 
 type WorkerConfig struct {
-	Concurrency       int
-	Lease             time.Duration
-	Poll              time.Duration
-	StreamIdleTimeout time.Duration
+	Concurrency             int
+	Lease                   time.Duration
+	Poll                    time.Duration
+	StreamFirstChunkTimeout time.Duration
+	StreamIdleTimeout       time.Duration
 }
 
 // EvaluatorConfig configures the optional sandbox-backed goal evaluator.
@@ -84,8 +91,21 @@ func (cfg Config) Validate() error {
 	if cfg.Worker.Poll <= 0 {
 		return errors.New("Worker.Poll must be positive")
 	}
+	if cfg.Worker.StreamFirstChunkTimeout < 0 {
+		return errors.New("Worker.StreamFirstChunkTimeout must not be negative")
+	}
 	if cfg.Worker.StreamIdleTimeout < 0 {
 		return errors.New("Worker.StreamIdleTimeout must not be negative")
+	}
+	for _, prefix := range cfg.Credentials.AllowedEnvPrefixes {
+		if strings.TrimSpace(prefix) == "" || strings.TrimSpace(prefix) != prefix {
+			return errors.New("Credentials.AllowedEnvPrefixes entries must be non-empty without spaces")
+		}
+	}
+	for _, name := range cfg.Credentials.AllowedEnvVars {
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
+			return errors.New("Credentials.AllowedEnvVars entries must be non-empty without spaces")
+		}
 	}
 	if cfg.Evaluator.BaseURL != "" && cfg.Evaluator.TokenEnv == "" {
 		return errors.New("Evaluator.TokenEnv is required when BaseURL is set")

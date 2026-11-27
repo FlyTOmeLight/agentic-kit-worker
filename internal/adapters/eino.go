@@ -29,8 +29,53 @@ import (
 	"github.com/FlyTOmeLight/agentic-kit-worker/internal/engine"
 )
 
+const defaultFirstChunkTimeout = 5 * time.Minute
+
+type BuilderOptions struct {
+	Credentials             CredentialPolicy
+	StreamFirstChunkTimeout time.Duration
+	StreamIdleTimeout       time.Duration
+}
+
+type Builder struct {
+	credentials        CredentialPolicy
+	streamingClient    *http.Client
+	nonStreamingClient *http.Client
+}
+
+func NewBuilder(opts BuilderOptions) *Builder {
+	firstChunk := opts.StreamFirstChunkTimeout
+	if firstChunk <= 0 {
+		if opts.StreamIdleTimeout > 0 {
+			firstChunk = opts.StreamIdleTimeout
+		} else {
+			firstChunk = defaultFirstChunkTimeout
+		}
+	}
+	headerTimeout := max(firstChunk, 2*time.Minute)
+	streamTransport := http.DefaultTransport.(*http.Transport).Clone()
+	streamTransport.ResponseHeaderTimeout = headerTimeout
+	syncTransport := http.DefaultTransport.(*http.Transport).Clone()
+	syncTransport.ResponseHeaderTimeout = headerTimeout
+	return &Builder{
+		credentials:        opts.Credentials,
+		streamingClient:    &http.Client{Transport: streamTransport},
+		nonStreamingClient: &http.Client{Transport: syncTransport, Timeout: max(15*time.Minute, headerTimeout)},
+	}
+}
+
+var defaultBuilder = NewBuilder(BuilderOptions{})
+
 // Build uses the same Eino model/tool interfaces as agentic-kit. OpenAI-compatible private model endpoints are supported.
 func Build(
+	ctx context.Context,
+	store *durable.Store,
+	spec durable.Spec,
+) (llm model.ToolCallingChatModel, bindings map[string]engine.Binding, err error) {
+	return defaultBuilder.Build(ctx, store, spec)
+}
+
+func (b *Builder) Build(
 	ctx context.Context,
 	store *durable.Store,
 	spec durable.Spec,
@@ -54,7 +99,11 @@ func Build(
 		}
 		closing.Wait()
 	}()
-	llm, err = buildModel(ctx, spec.Model)
+	credentials := b.credentials
+	if spec.Filesystem != nil {
+		credentials = credentials.WithDenied(spec.Filesystem.TokenEnv)
+	}
+	llm, err = b.buildModel(ctx, spec.Model, credentials)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -63,15 +112,19 @@ func Build(
 		if t.Kind != "" && t.Kind != "HTTP" {
 			return nil, nil, fmt.Errorf("unsupported tool kind %q for %s", t.Kind, t.Name)
 		}
+		if err = credentials.Validate(t.TokenEnv); err != nil {
+			return nil, nil, fmt.Errorf("tool %s: %w", t.Name, err)
+		}
 		var params jsonschema.Schema
 		if err = json.Unmarshal(t.Parameters, &params); err != nil {
 			return nil, nil, err
 		}
 		bindings[t.Name] = engine.Binding{
 			Tool: &httpTool{
-				spec:   t,
-				scope:  spec.Scope,
-				params: &params,
+				scope:       spec.Scope,
+				spec:        t,
+				params:      &params,
+				credentials: credentials,
 				client: &http.Client{
 					Timeout:       2 * time.Minute,
 					CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
@@ -151,7 +204,7 @@ func Build(
 		}
 	}
 	if len(spec.MCPServers) > 0 {
-		discovered, err = discoverMCPServers(ctx, spec)
+		discovered, err = discoverMCPServers(ctx, spec, credentials)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -169,6 +222,12 @@ func Build(
 		count := len(bindings)
 		if _, exists := bindings[durable.ReadStepResultToolName]; !exists {
 			count++
+		}
+		rc, _ := engine.BuildRunContext(ctx)
+		if (len(spec.SubAgents) > 0 || spec.SelfDelegate) && rc.ParentRunID == "" {
+			if _, exists := bindings[durable.DelegateSubAgentToolName]; !exists {
+				count++
+			}
 		}
 		if count > 128 {
 			return nil, nil, fmt.Errorf("tool count %d exceeds limit of 128", count)
@@ -191,24 +250,31 @@ func Build(
 	return llm, bindings, nil
 }
 
-var streamingModelHTTPClient = func() *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = 2 * time.Minute
-	return &http.Client{Transport: transport, Timeout: 15 * time.Minute}
-}()
-
 func buildModel(ctx context.Context, spec durable.ModelSpec) (model.ToolCallingChatModel, error) {
-	return newUsageModel(ctx, spec, streamingModelHTTPClient)
+	return defaultBuilder.buildModel(ctx, spec, defaultBuilder.credentials)
+}
+
+func (b *Builder) buildModel(
+	ctx context.Context,
+	spec durable.ModelSpec,
+	credentials CredentialPolicy,
+) (model.ToolCallingChatModel, error) {
+	client := b.streamingClient
+	if !spec.Streaming() {
+		client = b.nonStreamingClient
+	}
+	return newUsageModel(ctx, spec, client, credentials)
 }
 
 func newUsageModel(
 	ctx context.Context,
 	spec durable.ModelSpec,
 	client *http.Client,
+	credentials CredentialPolicy,
 ) (model.ToolCallingChatModel, error) {
-	key := os.Getenv(spec.APIKeyEnv)
-	if spec.APIKeyEnv != "" && key == "" {
-		return nil, errors.New("model credential environment variable is not configured")
+	key, err := credentials.Resolve(spec.APIKeyEnv, "model credential")
+	if err != nil {
+		return nil, err
 	}
 	llm, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
 		BaseURL:     spec.BaseURL,
@@ -269,10 +335,11 @@ type sandboxTool struct {
 }
 
 type httpTool struct {
-	scope  *durable.Scope
-	spec   durable.ToolSpec
-	params *jsonschema.Schema
-	client *http.Client
+	scope       *durable.Scope
+	spec        durable.ToolSpec
+	params      *jsonschema.Schema
+	credentials CredentialPolicy
+	client      *http.Client
 }
 
 func (t *httpTool) Info(context.Context) (*schema.ToolInfo, error) {
@@ -304,9 +371,9 @@ func (t *httpTool) InvokableRun(ctx context.Context, args string, _ ...tool.Opti
 		req.Header.Set("X-Agentic-Scope", string(scope))
 	}
 	if t.spec.TokenEnv != "" {
-		token := os.Getenv(t.spec.TokenEnv)
-		if token == "" {
-			return "", errors.New("tool credential is not configured")
+		token, err := t.credentials.Resolve(t.spec.TokenEnv, "tool credential")
+		if err != nil {
+			return "", err
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 	}

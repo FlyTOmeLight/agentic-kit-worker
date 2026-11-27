@@ -25,10 +25,29 @@ applicationConfig: |
   MaxIdleConns = 5
   ConnMaxIdleTime = 300
 
+  # 可选实时逐 token / 思考流。与 API 指向同一 Redis 与 DB 后开启。
+  # [Redis]
+  # Addrs = ["127.0.0.1:6379"]
+  # DB = 0
+
   [Worker]
   Concurrency = "${env:WORKER_CONCURRENCY:4}"
   Lease = "${env:WORKER_LEASE:30s}"
   Poll = "${env:WORKER_POLL:1s}"
+  StreamFirstChunkTimeout = "${env:WORKER_STREAM_FIRST_CHUNK_TIMEOUT:5m}"
+  StreamIdleTimeout = "${env:WORKER_STREAM_IDLE_TIMEOUT:2m}"
+
+  # 多租户生产环境建议启用凭据环境变量白名单，仅放行 Agent 专用凭据前缀。
+  # [Credentials]
+  # AllowedEnvPrefixes = ["AGENTIC_MODEL_", "AGENTIC_TOOL_", "AGENTIC_MCP_"]
+  # AllowedEnvVars = []
+
+  [Compaction]
+  MaxInputBytes = "${env:COMPACTION_MAX_INPUT_BYTES:65536}"
+
+  [Evaluator]
+  BaseURL = "${env:SANDBOX_CENTER_URL:}"
+  TokenEnv = "${env:SANDBOX_CENTER_TOKEN_ENV:SANDBOX_CENTER_TOKEN}"
 
 # 独立日志 TOML；可配置 Level 和 Outputs，不解析占位符。
 loggerConfig: |

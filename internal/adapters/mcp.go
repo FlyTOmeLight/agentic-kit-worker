@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -216,15 +215,18 @@ type mcpSession struct {
 	closeErr  error
 }
 
-func newMCPSession(ctx context.Context, server durable.MCPServerSpec, scope *durable.Scope) (*mcpSession, error) {
+func newMCPSession(
+	ctx context.Context,
+	server durable.MCPServerSpec,
+	scope *durable.Scope,
+	credentials CredentialPolicy,
+) (*mcpSession, error) {
 	var token, scopeHeader string
 	if server.TokenEnv != "" {
-		token = os.Getenv(server.TokenEnv)
-		if token == "" {
-			return nil, fmt.Errorf(
-				"MCP credential environment variable %q is not configured",
-				server.TokenEnv,
-			)
+		var err error
+		token, err = credentials.Resolve(server.TokenEnv, "MCP credential")
+		if err != nil {
+			return nil, err
 		}
 	}
 	if server.ForwardScope && scope != nil {
@@ -351,14 +353,18 @@ type mcpDiscovery struct {
 	bindings map[string]engine.Binding
 }
 
-func discoverMCPServers(ctx context.Context, spec durable.Spec) ([]mcpDiscovery, error) {
+func discoverMCPServers(
+	ctx context.Context,
+	spec durable.Spec,
+	credentials CredentialPolicy,
+) ([]mcpDiscovery, error) {
 	ctx, cancel := context.WithTimeout(ctx, mcpDiscoveryTimeout)
 	defer cancel()
 	discovered := make([]mcpDiscovery, len(spec.MCPServers))
 	group, ctx := errgroup.WithContext(ctx)
 	for index, server := range spec.MCPServers {
 		group.Go(func() error {
-			session, err := newMCPSession(ctx, server, spec.Scope)
+			session, err := newMCPSession(ctx, server, spec.Scope, credentials)
 			if err == nil {
 				discovered[index].session = session
 				discovered[index].bindings, err = session.discover(ctx, server)

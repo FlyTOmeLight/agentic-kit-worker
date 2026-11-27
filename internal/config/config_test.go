@@ -39,6 +39,7 @@ func TestFrameworkConfig(t *testing.T) {
 	t.Setenv("WORKER_CONCURRENCY", "6")
 	t.Setenv("WORKER_LEASE", "900ms")
 	t.Setenv("WORKER_POLL", "20ms")
+	t.Setenv("WORKER_STREAM_FIRST_CHUNK_TIMEOUT", "6m")
 	t.Setenv("WORKER_STREAM_IDLE_TIMEOUT", "3m")
 	t.Setenv("COMPACTION_MAX_INPUT_BYTES", "32768")
 	path := filepath.Join("..", "..", "conf", "server", "config.toml")
@@ -48,6 +49,7 @@ func TestFrameworkConfig(t *testing.T) {
 	}
 	if cfg.DB.DSN != "postgres://localhost/db" || cfg.HTTPServer.Listen != "127.0.0.1:9101" ||
 		cfg.Worker.Concurrency != 6 || cfg.Worker.Lease != 900*time.Millisecond || cfg.Worker.Poll != 20*time.Millisecond ||
+		cfg.Worker.StreamFirstChunkTimeout != 6*time.Minute ||
 		cfg.Worker.StreamIdleTimeout != 3*time.Minute ||
 		cfg.Compaction.MaxInputBytes != 32768 {
 		t.Fatalf("configuration not decoded: %+v", cfg)
@@ -57,6 +59,9 @@ func TestFrameworkConfig(t *testing.T) {
 	}
 	if len(cfg.Redis.Addrs) != 0 {
 		t.Fatalf("Redis must default to disabled: %v", cfg.Redis.Addrs)
+	}
+	if len(cfg.Credentials.AllowedEnvPrefixes) != 0 || len(cfg.Credentials.AllowedEnvVars) != 0 {
+		t.Fatalf("Credentials allowlist must default to empty: %+v", cfg.Credentials)
 	}
 }
 
@@ -123,7 +128,10 @@ MaxInputBytes = 65536
 		{name: "short lease", old: `Lease = "30s"`, value: `Lease = "1ms"`, want: "Worker.Lease"},
 		{name: "invalid duration", old: `Lease = "30s"`, value: `Lease = "bad"`, want: "Lease"},
 		{name: "zero poll", old: `Poll = "1s"`, value: `Poll = "0s"`, want: "Worker.Poll"},
+		{name: "negative stream first chunk timeout", old: `Poll = "1s"`, value: "Poll = \"1s\"\nStreamFirstChunkTimeout = \"-1s\"", want: "Worker.StreamFirstChunkTimeout"},
 		{name: "negative stream idle timeout", old: `Poll = "1s"`, value: "Poll = \"1s\"\nStreamIdleTimeout = \"-1s\"", want: "Worker.StreamIdleTimeout"},
+		{name: "blank credential prefix", old: `Poll = "1s"`, value: "Poll = \"1s\"\n[Credentials]\nAllowedEnvPrefixes = [\" \"]", want: "Credentials.AllowedEnvPrefixes"},
+		{name: "padded credential var", old: `Poll = "1s"`, value: "Poll = \"1s\"\n[Credentials]\nAllowedEnvVars = [\" KEY \"]", want: "Credentials.AllowedEnvVars"},
 		{name: "negative compaction threshold", old: "MaxInputBytes = 65536", value: "MaxInputBytes = -1", want: "Compaction.MaxInputBytes"},
 		{name: "invalid listen", old: `Listen = "127.0.0.1:0"`, value: `Listen = "bad"`, want: "HTTPServer.Listen"},
 		{name: "invalid port", old: `Listen = "127.0.0.1:0"`, value: `Listen = "127.0.0.1:65536"`, want: "HTTPServer.Listen"},

@@ -27,6 +27,7 @@ import (
 )
 
 const (
+	defaultStreamFirstChunkTimeout       = 5 * time.Minute
 	defaultStreamIdleTimeout             = 2 * time.Minute
 	streamFlushTimeout                   = 200 * time.Millisecond
 	subtaskDelegationUnavailableFeedback = `{"error":{"code":"SUBTASK_DELEGATION_UNAVAILABLE","message":"subtask cannot delegate further subtasks; finish the task directly with available tools"}}`
@@ -109,7 +110,15 @@ func (m *boundaryModel) collectStream(
 	if idleTimeout <= 0 {
 		idleTimeout = defaultStreamIdleTimeout
 	}
-	timer := time.AfterFunc(idleTimeout, func() { cancel(errStreamIdleTimeout) })
+	firstChunkTimeout := m.execution.streamFirstChunkTimeout
+	if firstChunkTimeout <= 0 {
+		if m.execution.streamIdleTimeout > 0 {
+			firstChunkTimeout = m.execution.streamIdleTimeout
+		} else {
+			firstChunkTimeout = defaultStreamFirstChunkTimeout
+		}
+	}
+	timer := time.AfterFunc(firstChunkTimeout, func() { cancel(errStreamIdleTimeout) })
 	defer timer.Stop()
 	reader, err := m.BaseChatModel.Stream(streamCtx, input, opts...)
 	if reader != nil {

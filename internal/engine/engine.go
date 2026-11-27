@@ -60,12 +60,13 @@ func BuildRunContext(ctx context.Context) (RunContext, bool) {
 }
 
 type Engine struct {
-	Store              *durable.Store
-	Build              Build
-	Summarizer         Summarizer
-	CompactionMaxBytes int
-	StreamIdleTimeout  time.Duration
-	NewDeltaPublisher  func(context.Context) DeltaPublisher
+	Store                   *durable.Store
+	Build                   Build
+	Summarizer              Summarizer
+	CompactionMaxBytes      int
+	StreamFirstChunkTimeout time.Duration
+	StreamIdleTimeout       time.Duration
+	NewDeltaPublisher       func(context.Context) DeltaPublisher
 }
 
 // DeltaPublisher accepts best-effort deltas from a single model stream.
@@ -126,7 +127,9 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 	s := &execution{
 		store: e.Store, run: run,
 		summarizer: e.Summarizer, compactionMaxBytes: e.CompactionMaxBytes,
-		streamIdleTimeout: e.StreamIdleTimeout, newDeltaPublisher: e.NewDeltaPublisher,
+		streamFirstChunkTimeout: e.StreamFirstChunkTimeout,
+		streamIdleTimeout:       e.StreamIdleTimeout,
+		newDeltaPublisher:       e.NewDeltaPublisher,
 	}
 	snapshot, err := decodeSnapshot(run)
 	if err != nil {
@@ -221,7 +224,7 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 		bindings[readStepResultTool] = binding
 		tools = append(tools, binding.Tool)
 	}
-	if dynamicTools && len(tools) > 128 {
+	if len(tools) > 128 {
 		return s.fail(ctx, fmt.Errorf("tool count %d exceeds limit of 128", len(tools)))
 	}
 	bindings[invalidInputTool] = Binding{Policy: durable.ReadOnly}

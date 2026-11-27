@@ -82,11 +82,26 @@ func newEngine(cfg *config.Config, store *durable.Store) (*engine.Engine, error)
 	if err := cfg.Pricing.Validate(); err != nil {
 		return nil, err
 	}
+	var denied []string
+	if cfg.Evaluator.TokenEnv != "" {
+		denied = append(denied, cfg.Evaluator.TokenEnv)
+	}
+	credentials := adapters.CredentialPolicy{
+		AllowedEnvPrefixes: cfg.Credentials.AllowedEnvPrefixes,
+		AllowedEnvVars:     cfg.Credentials.AllowedEnvVars,
+		DeniedEnvVars:      denied,
+	}
+	builder := adapters.NewBuilder(adapters.BuilderOptions{
+		Credentials:             credentials,
+		StreamFirstChunkTimeout: cfg.Worker.StreamFirstChunkTimeout,
+		StreamIdleTimeout:       cfg.Worker.StreamIdleTimeout,
+	})
 	return &engine.Engine{
-		Store:              store,
-		Build:              adapters.Build,
-		Summarizer:         adapters.Summarizer{},
-		CompactionMaxBytes: cfg.Compaction.MaxInputBytes,
-		StreamIdleTimeout:  cfg.Worker.StreamIdleTimeout,
+		Store:                   store,
+		Build:                   builder.Build,
+		Summarizer:              adapters.Summarizer{Credentials: credentials},
+		CompactionMaxBytes:      cfg.Compaction.MaxInputBytes,
+		StreamFirstChunkTimeout: cfg.Worker.StreamFirstChunkTimeout,
+		StreamIdleTimeout:       cfg.Worker.StreamIdleTimeout,
 	}, nil
 }

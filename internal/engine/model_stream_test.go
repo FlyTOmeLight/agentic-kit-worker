@@ -352,3 +352,73 @@ func TestHTTPModelOtherBadRequestDoesNotFallbackToGenerate(t *testing.T) {
 		t.Fatalf("calls=%d run=%+v state=%+v", calls, finished, state)
 	}
 }
+
+func TestHTTPModelStreamFirstChunkTimeoutDecoupledFromIdleTimeout(t *testing.T) {
+	store, _ := testDB(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		checkStreamRequest(t, r)
+		// Wait longer than StreamIdleTimeout (120ms) before headers/first chunk,
+		// but well within StreamFirstChunkTimeout (1s).
+		select {
+		case <-time.After(240 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		startModelStream(w)
+		writeModelChunk(w, `{"role":"assistant","content":"首"}`)
+		select {
+		case <-time.After(40 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		writeModelChunk(w, `{"content":"帧"}`)
+		finishModelStream(w, "stop", modelStreamUsage)
+	}))
+	defer upstream.Close()
+	run := submit(t, store, "lookup", durable.ReadOnly, func(spec *durable.Spec) {
+		spec.Model.BaseURL = upstream.URL
+	})
+	executor := &engine.Engine{
+		Store:                   store,
+		Build:                   adapters.Build,
+		StreamFirstChunkTimeout: time.Second,
+		StreamIdleTimeout:       120 * time.Millisecond,
+	}
+	if err := executor.Execute(ctx, claimForCompression(t, store)); err != nil {
+		t.Fatal(err)
+	}
+	finished, state, _ := compressionResult(t, store, run)
+	if finished.Status != durable.Completed || finished.Output != "首帧" || state.InflightModel != nil {
+		t.Fatalf("run=%+v state=%+v", finished, state)
+	}
+}
+
+func TestStaticToolCapRejects128StaticToolsWithReadStepResult(t *testing.T) {
+	store, _ := testDB(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	run := submit(t, store, "lookup", durable.ReadOnly, func(spec *durable.Spec) {
+		spec.Model.BaseURL = "http://127.0.0.1:1"
+		spec.Tools = make([]durable.ToolSpec, 128)
+		for i := range 128 {
+			spec.Tools[i] = durable.ToolSpec{
+				Name:       fmt.Sprintf("tool_%03d", i),
+				Kind:       "HTTP",
+				URL:        "http://127.0.0.1:1/tool",
+				Policy:     durable.ReadOnly,
+				Parameters: []byte(`{"type":"object"}`),
+			}
+		}
+	})
+	executor := &engine.Engine{Store: store, Build: adapters.Build}
+	if err := executor.Execute(ctx, claimForCompression(t, store)); err != nil {
+		t.Fatal(err)
+	}
+	finished, _, _ := compressionResult(t, store, run)
+	if finished.Status != durable.Failed ||
+		!strings.Contains(finished.Error, "tool count 129 exceeds limit of 128") {
+		t.Fatalf("expected 129 tool cap failure, got run=%+v", finished)
+	}
+}

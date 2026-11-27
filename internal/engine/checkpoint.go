@@ -64,6 +64,7 @@ type execution struct {
 	toolError                error
 	summarizer               Summarizer
 	compactionMaxBytes       int
+	streamFirstChunkTimeout  time.Duration
 	streamIdleTimeout        time.Duration
 	newDeltaPublisher        func(context.Context) DeltaPublisher
 	snapshot                 *contextbuilder.Snapshot

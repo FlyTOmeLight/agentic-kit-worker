@@ -26,7 +26,16 @@ ConnMaxIdleTime = 300
 Concurrency = "${env:WORKER_CONCURRENCY:4}"
 Lease = "${env:WORKER_LEASE:30s}"
 Poll = "${env:WORKER_POLL:1s}"
+StreamFirstChunkTimeout = "${env:WORKER_STREAM_FIRST_CHUNK_TIMEOUT:5m}"
 StreamIdleTimeout = "${env:WORKER_STREAM_IDLE_TIMEOUT:2m}"
+
+# Optional allowlist restricting which environment variables Agent model apiKeyEnv
+# and HTTP/MCP tool tokenEnv may read. Reserved platform credentials (DATABASE_URL,
+# SANDBOX_CENTER_TOKEN, Evaluator.TokenEnv, etc.) are always denied for Agent configs.
+# Recommended for multi-tenant production:
+# [Credentials]
+# AllowedEnvPrefixes = ["AGENTIC_MODEL_", "AGENTIC_TOOL_", "AGENTIC_MCP_"]
+# AllowedEnvVars = []
 
 [Compaction]
 MaxInputBytes = "${env:COMPACTION_MAX_INPUT_BYTES:65536}"

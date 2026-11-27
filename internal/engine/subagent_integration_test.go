@@ -1039,9 +1039,10 @@ func TestSubAgentToolCountUsesFinalDynamicToolset(t *testing.T) {
 		wantCount   int
 		wantFailure bool
 	}{
-		{name: "128 assembled", staticCount: 126, delegate: true, wantCount: 128},
-		{name: "129 assembled", staticCount: 127, delegate: true, wantFailure: true},
-		{name: "legacy static limit", staticCount: 128, wantCount: 129},
+		{name: "128 assembled with delegate", staticCount: 126, delegate: true, wantCount: 128},
+		{name: "129 assembled with delegate", staticCount: 127, delegate: true, wantFailure: true},
+		{name: "128 assembled without delegate", staticCount: 127, wantCount: 128},
+		{name: "129 assembled without delegate", staticCount: 128, wantFailure: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, _ := testDB(t)

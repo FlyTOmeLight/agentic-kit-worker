@@ -2,7 +2,7 @@
 
 独立部署的 Agent 执行进程。从 PostgreSQL 领取任务，用 Eino ADK `ChatModelAgent + Runner` 执行单 Agent ReAct。Eino 管理模型／工具循环、消息上下文和 checkpoint；平台保存 checkpoint、执行权与工具结果，进程重启后由其他实例接管。
 
-Worker 在 `go.mod` 中固定配套的 `agentic-kit-api` 版本。构建前需确保该版本能从 Go 模块源下载。当前使用 Go 1.27.1、server-go v0.13.0 和 Eino v0.9.2。运行方式、模块认证与可选 `go work` 联合开发见 [API 启动说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/README.md)。
+Worker 在 `go.mod` 中固定配套的 `agentic-kit-api` 版本。构建前需确保该版本能从 Go 模块源下载。当前使用 Go 1.27.1、server-go v0.17.1 和 Eino v0.9.2。运行方式、模块认证与可选 `go work` 联合开发见 [API 启动说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/README.md)。
 私有 GitHub 模块的模块校验将关闭：`GONOSUMDB=github.com/FlyTOmeLight/*`（默认 Go 环境通过 `GOPRIVATE` 也能达到相同效果）。
 
 ## 项目结构
@@ -30,7 +30,7 @@ Worker 在 `boundaryModel` 中用 API 的 `context-v4` 统一构建每次模型�
 5. 只读工具允许重试；幂等工具使用固定操作编号；结果不明确的 Unsafe 工具进入 NeedsReview。澄清工具进入 WaitingClarification。两者都保存 Eino checkpoint，人工结果提交后重新排队并恢复。
 6. 同轮工具按模型返回顺序执行。前一个工具等待确认或失败时，后面的工具不产生副作用。
 
-`engine.Build` 继续接收 Eino `ToolCallingChatModel` 与 `InvokableTool`；远端工具使用通用 HTTP POST：URL 为完整调用地址，直接发送模型生成的 JSON 参数并返回响应正文。工具类型仅接受 `HTTP` 或空值，其他类型在装配时拒绝。当前使用完整 Generate，SSE 展示步骤进度与完整结果，不逐 token 推送。
+`engine.Build` 继续接收 Eino `ToolCallingChatModel` 与 `InvokableTool`；远端静态工具使用通用 HTTP POST（`kind` 仅接受 `HTTP` 或空值），另支持标准 Streamable HTTP MCP 服务（按 `mcp__<server>__<tool>` 暴露、配置驱动策略与会话自动清理）以及多模态首问公网 `https://` 媒体映射与工作区文件产物自动追踪。模型调用默认开启带 `include_usage` 的流式采集，将逐 token 思考与正文增量推送到可选 Redis 瞬态流（支持 `model.stream=false` 与首帧前 `stream_options` 400 自动回退，以及分离的首帧超时与分片间空闲超时）。静态工具与运行时装配工具总数统一限制不超过 128 个。
 
 ### 升级边界
 
@@ -45,7 +45,7 @@ export DATABASE_URL='postgres://<user>:<password>@<host>:5432/<database>?sslmode
 go run ./cmd/worker -log-config conf/server/logger.toml
 ```
 
-应用通过 server-go v0.12.0 的 `app.Run` 加载一份配置快照。配置路径按 `-config`、`CONFIG_FILE`、`SERVER_CONFIG_PATH`、`conf/server/config.toml` 的顺序选取，文件必须存在。自定义文件可通过 `go run ./cmd/worker -config /absolute/path/config.toml` 指定。
+应用通过 server-go v0.17.1 的 `app.Run` 加载一份配置快照。配置路径按 `-config`、`CONFIG_FILE`、`SERVER_CONFIG_PATH`、`conf/server/config.toml` 的顺序选取，文件必须存在。自定义文件可通过 `go run ./cmd/worker -config /absolute/path/config.toml` 指定。
 
 应用配置支持框架的 `${env:NAME[:default]}`、`${file:/path}` 和 `${secret:...}` 占位符。环境变量通过文件中的占位符读取，不自动覆盖任意 TOML 字段。占位符缺少必需值或无法解析时，启动失败。随附配置使用以下字段：
 
@@ -56,13 +56,18 @@ go run ./cmd/worker -log-config conf/server/logger.toml
 | DB.AutoMigrate | — | false，启动不迁移；部署前准备数据库结构 |
 | DB.MaxOpenConns / DB.MaxIdleConns | — | 20 / 5 |
 | DB.ConnMaxIdleTime | — | 300 秒 |
+| Redis.Addrs / Redis.DB | — | 可选，配置后与 API 共享 Redis 推送实时逐 token/思考增量 |
 | HTTPServer.Listen | LISTEN_ADDR | 127.0.0.1:8081 |
 | RunMode | GIN_MODE | release |
 | HTTPServer.ReadTimeout / WriteTimeout / IdleTimeout | — | 10000 / 10000 / 60000 毫秒 |
 | Worker.Concurrency | WORKER_CONCURRENCY | 4，必须大于 0 |
 | Worker.Lease | WORKER_LEASE | 30s，至少 300ms；每三分之一租约时间续期 |
 | Worker.Poll | WORKER_POLL | 1s，必须大于 0 |
+| Worker.StreamFirstChunkTimeout | WORKER_STREAM_FIRST_CHUNK_TIMEOUT | 5m，流式首帧到达超时（同步驱动模型 HTTP `ResponseHeaderTimeout`，下限 2m） |
+| Worker.StreamIdleTimeout | WORKER_STREAM_IDLE_TIMEOUT | 2m，首帧到达后的分片间空闲超时 |
+| Credentials.AllowedEnvPrefixes / AllowedEnvVars | — | 凭据白名单，限制 Agent 的 `apiKeyEnv`/HTTP 与 MCP `tokenEnv` 可读环境变量；平台保留变量与当前 Run 绑定的 `Filesystem.TokenEnv` 始终禁读。**多租户生产环境必须配置** |
 | Compaction.MaxInputBytes | COMPACTION_MAX_INPUT_BYTES | 65536，未配置模型窗口时用于提前触发字节压缩，0 表示沿用快照的字节阈值 |
+| Evaluator.BaseURL / Evaluator.TokenEnv | SANDBOX_CENTER_URL / SANDBOX_CENTER_TOKEN_ENV | 可选，配置后启用沙箱 Goal 验收，空则保持 fail-closed |
 
 ### 模型计价
 
@@ -80,7 +85,7 @@ API 在接受 Run 时冻结计价方式。Worker 只读取 `Spec.PricingFrozen` 
 
 运行时由框架 `db.Module` 创建和关闭唯一的数据库连接池，`pkg/durable.New` 借用该连接，负责已有事务与状态操作。HTTPHost 的 `Start` 启动执行协程；SIGTERM 退出时先停止 HTTP 接入，再取消并等待 Worker，最后由运行时关闭数据库。框架提供 `/healthz`（服务已启动）和 `/ping`（进程存活），它们不检查数据库的持续可用性。本地默认仅监听回环地址；Docker 与 Helm 监听 `0.0.0.0:8081`，Helm 使用这两个端点探测。
 
-Worker 不使用 Redis；事件通知由 API 的 Outbox Relay 处理。模型和工具凭据由任务快照中的 APIKeyEnv/TokenEnv 指定，通过运行环境提供，实际凭据不存数据库。Worker 构建不需要 CGO，固定依赖见 go.mod/go.sum。
+权威事件通知由 API 的 Outbox Relay 处理；Worker 配置可选 `[Redis]` 后额外推送瞬态模型增量（未配置或 Redis 故障不影响权威执行）。模型和工具凭据由任务快照中的 `APIKeyEnv`/`TokenEnv` 指定，经平台保留名拦截与可选 `[Credentials]` 白名单校验后通过运行环境提供，实际凭据不存数据库。Worker 构建不需要 CGO，固定依赖见 go.mod/go.sum。
 
 API 主程序提交任务的总期限为 24 小时，包括等待澄清；默认最多 5 次连续执行尝试。模型/HTTP 工具单次请求超时为 2 分钟；终态后不再接管。修改这些值时应结合真实任务时长评估，不代表已测得的性能指标。
 
