@@ -12,6 +12,7 @@ var credentialEnvPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 
 var reservedPlatformEnvVars = map[string]struct{}{
 	"DATABASE_URL":                   {},
+	"AGENTIC_API_TOKEN":              {},
 	"SANDBOX_CENTER_TOKEN":           {},
 	"REDIS_PASSWORD":                 {},
 	"FORGE_SERVICE_API_KEY":          {},

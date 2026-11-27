@@ -63,6 +63,7 @@ type Engine struct {
 	Store                   *durable.Store
 	Build                   Build
 	Summarizer              Summarizer
+	SkillReader             SkillReader
 	CompactionMaxBytes      int
 	StreamFirstChunkTimeout time.Duration
 	StreamIdleTimeout       time.Duration
@@ -126,7 +127,7 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 	})
 	s := &execution{
 		store: e.Store, run: run,
-		summarizer: e.Summarizer, compactionMaxBytes: e.CompactionMaxBytes,
+		summarizer: e.Summarizer, skillReader: e.SkillReader, compactionMaxBytes: e.CompactionMaxBytes,
 		streamFirstChunkTimeout: e.StreamFirstChunkTimeout,
 		streamIdleTimeout:       e.StreamIdleTimeout,
 		newDeltaPublisher:       e.NewDeltaPublisher,
@@ -205,6 +206,18 @@ func (e *Engine) execute(ctx context.Context, run *durable.Run, beforeRelease fu
 	}
 	if bindings == nil {
 		bindings = make(map[string]Binding)
+	}
+	if len(run.Spec.Skills) > 0 {
+		if _, exists := bindings[loadSkillToolName]; exists {
+			return s.fail(ctx, fmt.Errorf("duplicate reserved tool: %s", loadSkillToolName))
+		}
+		binding, err := loadSkillBinding(s)
+		if err != nil {
+			return s.fail(ctx, err)
+		}
+		bindings[loadSkillToolName] = binding
+		tools = append(tools, binding.Tool)
+		dynamicTools = true
 	}
 	if _, exists := bindings[durable.DelegateSubAgentToolName]; !exists && canDelegate(run) {
 		binding, err := delegateSubAgentBinding(s)

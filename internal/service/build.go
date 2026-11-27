@@ -51,6 +51,23 @@ func Build(ctx context.Context, runtime *app.Runtime, cfg *config.Config) error 
 		Lease:       cfg.Worker.Lease,
 		Poll:        cfg.Worker.Poll,
 	}
+	var closers []func() error
+	if cfg.ControlPlane.BaseURL != "" {
+		token := os.Getenv(cfg.ControlPlane.TokenEnv)
+		if token == "" {
+			return errors.New("control-plane credential is not configured")
+		}
+		cpClient, clientErr := sdk.NewClient(
+			cfg.ControlPlane.BaseURL,
+			token,
+			&http.Client{Timeout: 30 * time.Second},
+		)
+		if clientErr != nil {
+			return clientErr
+		}
+		executionEngine.SkillReader = engine.HTTPSkillReader{Client: cpClient.Executions}
+		closers = append(closers, cpClient.Close)
+	}
 	if cfg.Evaluator.BaseURL != "" {
 		token := os.Getenv(cfg.Evaluator.TokenEnv)
 		if token == "" {
@@ -64,6 +81,7 @@ func Build(ctx context.Context, runtime *app.Runtime, cfg *config.Config) error 
 		if clientErr != nil {
 			return clientErr
 		}
+		closers = append(closers, client.Close)
 		worker.Evaluator = engine.SandboxEvaluator{
 			Runner: engine.HTTPSandboxRunner{Client: client.Sandboxes},
 			Store:  store,
@@ -75,7 +93,9 @@ func Build(ctx context.Context, runtime *app.Runtime, cfg *config.Config) error 
 	if err := worker.Validate(); err != nil {
 		return err
 	}
-	return runtime.AddService(New(worker))
+	svc := New(worker)
+	svc.closers = closers
+	return runtime.AddService(svc)
 }
 
 func newEngine(cfg *config.Config, store *durable.Store) (*engine.Engine, error) {
@@ -85,6 +105,9 @@ func newEngine(cfg *config.Config, store *durable.Store) (*engine.Engine, error)
 	var denied []string
 	if cfg.Evaluator.TokenEnv != "" {
 		denied = append(denied, cfg.Evaluator.TokenEnv)
+	}
+	if cfg.ControlPlane.TokenEnv != "" {
+		denied = append(denied, cfg.ControlPlane.TokenEnv)
 	}
 	credentials := adapters.CredentialPolicy{
 		AllowedEnvPrefixes: cfg.Credentials.AllowedEnvPrefixes,

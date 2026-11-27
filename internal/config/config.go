@@ -14,15 +14,16 @@ import (
 )
 
 type Config struct {
-	RunMode     string
-	DB          db.Config
-	Redis       frameworkredis.Config
-	Worker      WorkerConfig
-	Credentials CredentialsConfig
-	Evaluator   EvaluatorConfig
-	Pricing     PricingConfig
-	Compaction  CompactionConfig
-	HTTPServer  conf.HTTPServerConfig
+	RunMode      string
+	DB           db.Config
+	Redis        frameworkredis.Config
+	Worker       WorkerConfig
+	Credentials  CredentialsConfig
+	ControlPlane ControlPlaneConfig
+	Evaluator    EvaluatorConfig
+	Pricing      PricingConfig
+	Compaction   CompactionConfig
+	HTTPServer   conf.HTTPServerConfig
 }
 
 type CredentialsConfig struct {
@@ -51,6 +52,16 @@ type WorkerConfig struct {
 	Poll                    time.Duration
 	StreamFirstChunkTimeout time.Duration
 	StreamIdleTimeout       time.Duration
+}
+
+// ControlPlaneConfig configures the optional API control-plane client used by
+// built-in worker tools such as load_skill. Leave BaseURL empty when runs do
+// not use control-plane backed features. TokenEnv names the environment
+// variable holding the worker service credential; the secret value never enters
+// configuration.
+type ControlPlaneConfig struct {
+	BaseURL  string
+	TokenEnv string
 }
 
 // EvaluatorConfig configures the optional sandbox-backed goal evaluator.
@@ -106,6 +117,9 @@ func (cfg Config) Validate() error {
 		if strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
 			return errors.New("Credentials.AllowedEnvVars entries must be non-empty without spaces")
 		}
+	}
+	if cfg.ControlPlane.BaseURL != "" && cfg.ControlPlane.TokenEnv == "" {
+		return errors.New("ControlPlane.TokenEnv is required when BaseURL is set")
 	}
 	if cfg.Evaluator.BaseURL != "" && cfg.Evaluator.TokenEnv == "" {
 		return errors.New("Evaluator.TokenEnv is required when BaseURL is set")

@@ -11,10 +11,11 @@ import (
 
 // Worker owns the execution goroutine and borrows its initialized dependencies.
 type Worker struct {
-	worker *engine.Worker
-	cancel context.CancelFunc
-	done   chan struct{}
-	err    error
+	worker  *engine.Worker
+	closers []func() error
+	cancel  context.CancelFunc
+	done    chan struct{}
+	err     error
 }
 
 func New(worker *engine.Worker) *Worker { return &Worker{worker: worker} }
@@ -41,6 +42,11 @@ func (s *Worker) Start(ctx context.Context) error {
 }
 
 func (s *Worker) Stop(ctx context.Context) error {
+	defer func() {
+		for _, closeFn := range s.closers {
+			_ = closeFn()
+		}
+	}()
 	if s.cancel == nil {
 		return nil
 	}

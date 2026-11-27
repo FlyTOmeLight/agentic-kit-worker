@@ -43,6 +43,13 @@ MaxInputBytes = "${env:COMPACTION_MAX_INPUT_BYTES:65536}"
 # Pricing is frozen by the API in each Run. Do not add a [Pricing] section here;
 # legacy worker pricing configuration is rejected at startup.
 
+# Optional control-plane API connection used by on-demand skill loading (load_skill).
+# Leave BaseURL empty if runs do not mount skills. TokenEnv names the environment
+# variable holding the worker service credential allowed by API [Worker].AllowedServices.
+[ControlPlane]
+BaseURL = "${env:AGENTIC_API_URL:}"
+TokenEnv = "${env:AGENTIC_API_TOKEN_ENV:AGENTIC_API_TOKEN}"
+
 # Sandbox-backed goal evaluator. Leave BaseURL empty to keep the
 # fail-closed UnavailableEvaluator. TokenEnv names the environment variable
 # holding the credential; the secret value never enters configuration.

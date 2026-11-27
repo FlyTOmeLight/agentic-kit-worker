@@ -229,6 +229,11 @@ func (b *Builder) Build(
 				count++
 			}
 		}
+		if len(spec.Skills) > 0 {
+			if _, exists := bindings[durable.LoadSkillToolName]; !exists {
+				count++
+			}
+		}
 		if count > 128 {
 			return nil, nil, fmt.Errorf("tool count %d exceeds limit of 128", count)
 		}

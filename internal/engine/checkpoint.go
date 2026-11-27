@@ -33,20 +33,21 @@ type UsageAnchor struct {
 type State struct {
 	ArtifactFiles []contextbuilder.FileIndexEntry `json:"artifactFiles,omitempty"`
 
-	UsageAnchor                *UsageAnchor    `json:"usageAnchor,omitempty"`
-	SummaryConsecutiveFailures int             `json:"summaryConsecutiveFailures,omitempty"`
-	CompactedInteractionPins   []compactedPin  `json:"compactedInteractionPins,omitempty"`
-	Version                    int             `json:"version"`
-	Checkpoint                 []byte          `json:"checkpoint,omitempty"`
-	Turn                       int             `json:"turn"`
-	SummaryCalls               int64           `json:"summaryCalls,omitempty"`
-	InflightModel              *InflightModel  `json:"inflightModel,omitempty"`
-	PendingModel               *schema.Message `json:"pendingModel,omitempty"`
-	PricingFailure             string          `json:"pricingFailure,omitempty"`
-	ReturnDirectlyStep         string          `json:"returnDirectlyStep,omitempty"`
-	Final                      *string         `json:"final,omitempty"`
-	Steers                     []string        `json:"steers,omitempty"`
-	StreamFallback             bool            `json:"streamFallback,omitempty"`
+	UsageAnchor                *UsageAnchor       `json:"usageAnchor,omitempty"`
+	SummaryConsecutiveFailures int                `json:"summaryConsecutiveFailures,omitempty"`
+	CompactedInteractionPins   []compactedPin     `json:"compactedInteractionPins,omitempty"`
+	CompactedSkillPin          *compactedSkillPin `json:"compactedSkillPin,omitempty"`
+	Version                    int                `json:"version"`
+	Checkpoint                 []byte             `json:"checkpoint,omitempty"`
+	Turn                       int                `json:"turn"`
+	SummaryCalls               int64              `json:"summaryCalls,omitempty"`
+	InflightModel              *InflightModel     `json:"inflightModel,omitempty"`
+	PendingModel               *schema.Message    `json:"pendingModel,omitempty"`
+	PricingFailure             string             `json:"pricingFailure,omitempty"`
+	ReturnDirectlyStep         string             `json:"returnDirectlyStep,omitempty"`
+	Final                      *string            `json:"final,omitempty"`
+	Steers                     []string           `json:"steers,omitempty"`
+	StreamFallback             bool               `json:"streamFallback,omitempty"`
 }
 
 type execution struct {
@@ -63,6 +64,7 @@ type execution struct {
 	retry                    bool
 	toolError                error
 	summarizer               Summarizer
+	skillReader              SkillReader
 	compactionMaxBytes       int
 	streamFirstChunkTimeout  time.Duration
 	streamIdleTimeout        time.Duration

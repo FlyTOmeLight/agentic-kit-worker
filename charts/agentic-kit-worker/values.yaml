@@ -45,6 +45,10 @@ applicationConfig: |
   [Compaction]
   MaxInputBytes = "${env:COMPACTION_MAX_INPUT_BYTES:65536}"
 
+  [ControlPlane]
+  BaseURL = "${env:AGENTIC_API_URL:}"
+  TokenEnv = "${env:AGENTIC_API_TOKEN_ENV:AGENTIC_API_TOKEN}"
+
   [Evaluator]
   BaseURL = "${env:SANDBOX_CENTER_URL:}"
   TokenEnv = "${env:SANDBOX_CENTER_TOKEN_ENV:SANDBOX_CENTER_TOKEN}"

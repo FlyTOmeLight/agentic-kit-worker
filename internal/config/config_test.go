@@ -63,6 +63,9 @@ func TestFrameworkConfig(t *testing.T) {
 	if len(cfg.Credentials.AllowedEnvPrefixes) != 0 || len(cfg.Credentials.AllowedEnvVars) != 0 {
 		t.Fatalf("Credentials allowlist must default to empty: %+v", cfg.Credentials)
 	}
+	if cfg.ControlPlane.BaseURL != "" || cfg.ControlPlane.TokenEnv != "AGENTIC_API_TOKEN" {
+		t.Fatalf("ControlPlane defaults unexpected: %+v", cfg.ControlPlane)
+	}
 }
 
 func TestFrameworkSnapshot(t *testing.T) {
@@ -187,5 +190,12 @@ Poll = "1s"
 				t.Fatalf("missing migration instruction: %v", err)
 			}
 		})
+	}
+	if _, err := decodeConfig(t, writeConfig(t, base+`
+[ControlPlane]
+BaseURL = "https://api.example.com"
+TokenEnv = ""
+`)); err == nil || !strings.Contains(err.Error(), "ControlPlane.TokenEnv") {
+		t.Fatalf("expected ControlPlane.TokenEnv validation error, got %v", err)
 	}
 }

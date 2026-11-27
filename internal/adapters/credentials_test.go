@@ -15,6 +15,7 @@ import (
 
 func TestCredentialPolicyDeniesReservedAndEnforcesAllowlist(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://secret")
+	t.Setenv("AGENTIC_API_TOKEN", "api-secret")
 	t.Setenv("SANDBOX_CENTER_TOKEN", "sandbox-secret")
 	t.Setenv("CUSTOM_EVAL_TOKEN", "eval-secret")
 	t.Setenv("AGENTIC_TOOL_OK", "allowed-prefix-secret")
@@ -22,7 +23,7 @@ func TestCredentialPolicyDeniesReservedAndEnforcesAllowlist(t *testing.T) {
 	t.Setenv("UNLISTED_TOKEN", "unlisted-secret")
 
 	defaultPolicy := CredentialPolicy{DeniedEnvVars: []string{"CUSTOM_EVAL_TOKEN"}}
-	for _, denied := range []string{"DATABASE_URL", "SANDBOX_CENTER_TOKEN", "CUSTOM_EVAL_TOKEN", "BAD=NAME", "1INVALID"} {
+	for _, denied := range []string{"DATABASE_URL", "AGENTIC_API_TOKEN", "SANDBOX_CENTER_TOKEN", "CUSTOM_EVAL_TOKEN", "BAD=NAME", "1INVALID"} {
 		if _, err := defaultPolicy.Resolve(denied, "tool credential"); err == nil {
 			t.Fatalf("expected %q to be rejected by default policy", denied)
 		}

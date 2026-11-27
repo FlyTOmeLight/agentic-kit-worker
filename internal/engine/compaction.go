@@ -76,9 +76,19 @@ func (s *execution) compactContext(
 		firstKept = rows[cut].Seq
 	}
 	var pins []compactedPin
+	var latestSkillPin *compactedSkillPin
+	toolNames := make(map[string]string)
 	for _, row := range rows[:cut] {
+		for _, call := range row.ToolCalls {
+			toolNames[call.ID] = call.Name
+		}
 		if pin, ok := interactionPin(row); ok {
 			pins = append(pins, pin)
+		}
+		if row.Role == "tool" && toolNames[row.ToolCallID] == loadSkillToolName {
+			if skillPin, ok := buildSkillPin(row.Seq, row.Content); ok {
+				latestSkillPin = skillPin
+			}
 		}
 		if row.Kind != "User" {
 			head = append(head, row.Message)
@@ -125,6 +135,10 @@ func (s *execution) compactContext(
 		if !alreadySaved {
 			s.state.CompactedInteractionPins = append(s.state.CompactedInteractionPins, pin)
 		}
+	}
+	if latestSkillPin != nil &&
+		(s.state.CompactedSkillPin == nil || latestSkillPin.Seq > s.state.CompactedSkillPin.Seq) {
+		s.state.CompactedSkillPin = latestSkillPin
 	}
 	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer persistCancel()

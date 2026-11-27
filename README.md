@@ -17,6 +17,8 @@ Worker 在 `boundaryModel` 中用 API 的 `context-v4` 统一构建每次模型�
 
 配置 `SubAgents` 或 `SelfDelegate` 的主 Run 可通过 `delegate_subagent` 委派任务。各子 Run 使用冻结的模型和提示词，在独立会话中执行。Worker 在同一事务中创建子 Run、保存父 checkpoint 并挂起父 Run。子 Run 成功、失败或取消后，父 Run 从等待的工具步骤恢复。同轮多个委派按顺序执行。子 Run 不提供内置委派工具，调用用户澄清工具时会收到反馈并继续执行。
 
+配置 `Skills` 的 Run（及继承或自有 `Skills` 的子 Run）在上下文中挂载冻结的 `skills` 目录摘要，并注册只读内置工具 `load_skill`。Worker 通过可选 `[ControlPlane]` 配置凭当前有效任务租约调用 API `/internal/v1/worker/runs/{id}/skills/read` 按需读取冻结清单内的 `SKILL.md` 及辅助文件，结果由 `durable_step` 存档，崩溃恢复时直接重放而不重复拉取。当前轮最新一次成功的 `load_skill`（`SKILL.md` 且不超过 16 KiB 与 `MaxToolResultBytes`）受 `Exempt` 保护；被摘要或轮次裁剪淘汰后以 `skill` PinnedBlock 携带，预算极紧时自动降级为重载提示避免触发 `ContextBudgetExceeded`。
+
 入口位于 `cmd/worker`，server-go 生命周期与资源装配位于 `internal/service`，执行器位于 `internal/engine`，模型与工具适配位于 `internal/adapters`。数据库访问统一由 API 的 `pkg/durable` 使用 GORM 管理，worker 复用其中的事务和状态操作；[目录与依赖说明](https://github.com/FlyTOmeLight/agentic-kit-api/blob/main/docs/layout.md)。
 
 ## Agent 架构与执行规则
@@ -65,7 +67,8 @@ go run ./cmd/worker -log-config conf/server/logger.toml
 | Worker.Poll | WORKER_POLL | 1s，必须大于 0 |
 | Worker.StreamFirstChunkTimeout | WORKER_STREAM_FIRST_CHUNK_TIMEOUT | 5m，流式首帧到达超时（同步驱动模型 HTTP `ResponseHeaderTimeout`，下限 2m） |
 | Worker.StreamIdleTimeout | WORKER_STREAM_IDLE_TIMEOUT | 2m，首帧到达后的分片间空闲超时 |
-| Credentials.AllowedEnvPrefixes / AllowedEnvVars | — | 凭据白名单，限制 Agent 的 `apiKeyEnv`/HTTP 与 MCP `tokenEnv` 可读环境变量；平台保留变量与当前 Run 绑定的 `Filesystem.TokenEnv` 始终禁读。**多租户生产环境必须配置** |
+| Credentials.AllowedEnvPrefixes / AllowedEnvVars | — | 凭据白名单，限制 Agent 的 `apiKeyEnv`/HTTP 与 MCP `tokenEnv` 可读环境变量；平台保留变量（含 `AGENTIC_API_TOKEN`、`SANDBOX_CENTER_TOKEN`）、`ControlPlane.TokenEnv`、`Evaluator.TokenEnv` 与当前 Run 绑定的 `Filesystem.TokenEnv` 始终禁读。**多租户生产环境必须配置** |
+| ControlPlane.BaseURL / ControlPlane.TokenEnv | AGENTIC_API_URL / AGENTIC_API_TOKEN_ENV | 可选，配置后启用 `load_skill` 经 API 按需读取冻结 Skill 文件，空则不连接 API |
 | Compaction.MaxInputBytes | COMPACTION_MAX_INPUT_BYTES | 65536，未配置模型窗口时用于提前触发字节压缩，0 表示沿用快照的字节阈值 |
 | Evaluator.BaseURL / Evaluator.TokenEnv | SANDBOX_CENTER_URL / SANDBOX_CENTER_TOKEN_ENV | 可选，配置后启用沙箱 Goal 验收，空则保持 fail-closed |
 

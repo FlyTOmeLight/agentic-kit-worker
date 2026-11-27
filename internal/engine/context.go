@@ -235,9 +235,11 @@ func setProjectedContent(msg *schema.Message, projected contextbuilder.Message) 
 // projectedTurn keeps the original Eino messages available for metadata and
 // uses durable sequence numbers only to select which messages reach the model.
 type projectedTurn struct {
-	messages  []contextbuilder.Message
-	originals map[string]*schema.Message
-	human     map[string]compactedPin
+	messages          []contextbuilder.Message
+	originals         map[string]*schema.Message
+	human             map[string]compactedPin
+	activeSkill       *compactedSkillPin
+	activeSkillCallID string
 }
 
 type compactedPin struct {
@@ -271,6 +273,7 @@ func projectTurn(
 	query string,
 	projection durable.ContextProjection,
 	attachments []contextbuilder.Attachment,
+	maxSkillExempt int64,
 ) (projectedTurn, error) {
 	out := projectedTurn{
 		originals: make(map[string]*schema.Message),
@@ -290,6 +293,7 @@ func projectTurn(
 		}
 	}
 	names := make(map[string]string)
+	latestSkillIdx := -1
 	for i, source := range original {
 		message, err := toContextMessage(source)
 		if err != nil {
@@ -317,6 +321,13 @@ func projectTurn(
 			_, human := out.human[message.ToolCallID]
 			message.Exempt = human || message.ToolName == "ask_for_clarification" ||
 				message.ToolName == readStepResultTool
+			if message.ToolName == loadSkillToolName {
+				if pin, ok := buildSkillPin(0, message.Content); ok {
+					latestSkillIdx = len(out.messages)
+					out.activeSkill = pin
+					out.activeSkillCallID = message.ToolCallID
+				}
+			}
 			out.originals["tool:"+message.ToolCallID] = source
 		} else {
 			// The builder carries ToolName through for all roles. On non-tool
@@ -325,6 +336,9 @@ func projectTurn(
 			out.originals[message.ToolName] = source
 		}
 		out.messages = append(out.messages, message)
+	}
+	if latestSkillIdx >= 0 && int64(len(out.messages[latestSkillIdx].Content)) <= maxSkillExempt {
+		out.messages[latestSkillIdx].Exempt = true
 	}
 	if len(out.messages) == 0 {
 		message := contextbuilder.Message{Role: contextbuilder.RoleUser, Content: query}
@@ -415,8 +429,10 @@ func (s *execution) prepareModelInput(
 	original := s.currentRunMessages(stateMessages)
 	query := s.run.Spec.Query
 	attachments := contextAttachments(s.run.Spec.Attachments)
+	maxSkillExempt := skillExemptLimit(budget)
+	skillHint := ""
 	prepareTurn := func() (projectedTurn, error) {
-		turn, err := projectTurn(original, query, projection, attachments)
+		turn, err := projectTurn(original, query, projection, attachments, maxSkillExempt)
 		if err != nil {
 			return turn, err
 		}
@@ -430,6 +446,7 @@ func (s *execution) prepareModelInput(
 		}
 		in.CompactedSummary = projection.Summary
 		in.PinnedBlocks = nil
+		skillHint = ""
 		if projection.FirstKeptSeq > 0 && len(turn.messages) > 0 &&
 			(turn.messages[0].Role != contextbuilder.RoleUser || turn.messages[0].Content != capRunes(query, 8000)) {
 			in.PinnedBlocks = append(
@@ -441,6 +458,18 @@ func (s *execution) prepareModelInput(
 			if pin.Seq < projection.FirstKeptSeq {
 				in.PinnedBlocks = append(in.PinnedBlocks, pin.Block)
 			}
+		}
+		if turn.activeSkill == nil && s.state.CompactedSkillPin != nil &&
+			s.state.CompactedSkillPin.Seq < projection.FirstKeptSeq {
+			content := s.state.CompactedSkillPin.Content
+			if content == "" {
+				content = s.state.CompactedSkillPin.ReloadHint
+			}
+			in.PinnedBlocks = append(
+				in.PinnedBlocks,
+				contextbuilder.PinnedBlock{Label: "skill", Content: content},
+			)
+			skillHint = s.state.CompactedSkillPin.ReloadHint
 		}
 		return turn, nil
 	}
@@ -491,7 +520,7 @@ func (s *execution) prepareModelInput(
 	result.Usage.OutputReserve = budget.OutputReserve
 	if targetTokens > 0 || targetBytes > 0 || reactiveAttempt > 0 ||
 		(budget.ContextWindow > 0 && budget.OutputReserve >= budget.ContextWindow) {
-		result, err = contextbuilder.Build(in)
+		result, err = buildWithSkillFallback(in, skillHint)
 	}
 	if needsCompression(result, err) && s.summarizer != nil && s.store != nil &&
 		s.state.SummaryConsecutiveFailures < summaryFailureLimit && reactiveAttempt <= 3 {
@@ -512,7 +541,7 @@ func (s *execution) prepareModelInput(
 		if err != nil {
 			return nil, nil, 0, err
 		}
-		result, err = contextbuilder.Build(in)
+		result, err = buildWithSkillFallback(in, skillHint)
 	}
 	if needsCompression(result, err) {
 		in.AllowDropCurrentRounds = true
@@ -523,11 +552,21 @@ func (s *execution) prepareModelInput(
 				in.PinnedBlocks = append(in.PinnedBlocks, pin.Block)
 				message.Content = "[See pinned " + pin.Block.Label + "]"
 			}
+			if turn.activeSkill != nil && message.Role == contextbuilder.RoleTool &&
+				message.ToolCallID == turn.activeSkillCallID {
+				in.PinnedBlocks = append(
+					in.PinnedBlocks,
+					contextbuilder.PinnedBlock{Label: "skill", Content: turn.activeSkill.Content},
+				)
+				skillHint = turn.activeSkill.ReloadHint
+				message.Content = "[See pinned skill]"
+				message.Exempt = false
+			}
 			if i == 0 && message.Role == contextbuilder.RoleUser && message.Content == query {
 				message.Content = capRunes(query, 8000)
 			}
 		}
-		result, err = contextbuilder.Build(in)
+		result, err = buildWithSkillFallback(in, skillHint)
 	}
 	if err != nil {
 		return nil, nil, 0, err
@@ -559,6 +598,26 @@ func (s *execution) prepareModelInput(
 	s.lastUsedUsageAnchor = usedAnchor
 	s.lastReactiveAttempt = reactiveAttempt
 	return turn.render(result.Messages), info, result.Usage.InputTokens, nil
+}
+
+func buildWithSkillFallback(in contextbuilder.BuildInput, reloadHint string) (contextbuilder.BuildResult, error) {
+	result, err := contextbuilder.Build(in)
+	if !errors.Is(err, contextbuilder.ErrBudgetExceeded) || reloadHint == "" {
+		return result, err
+	}
+	degraded := false
+	pins := append([]contextbuilder.PinnedBlock(nil), in.PinnedBlocks...)
+	for i := range pins {
+		if pins[i].Label == "skill" && pins[i].Content != reloadHint {
+			pins[i].Content = reloadHint
+			degraded = true
+		}
+	}
+	if !degraded {
+		return result, err
+	}
+	in.PinnedBlocks = pins
+	return contextbuilder.Build(in)
 }
 
 func needsCompression(result contextbuilder.BuildResult, err error) bool {
